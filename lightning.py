@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 import h5py
 import numpy as np
 
+_FETCH_FAILED = False
+
 # GOES-19 became GOES-East in 2025, replacing GOES-16; GOES-18 is West. Both
 # publish GLM. East alone covers every coast SeaWise supports except the
 # Pacific, so West is fetched too.
@@ -65,17 +67,26 @@ def started_at(key):
 
 
 def recent_keys(bucket, minutes, now):
-    """Keys for the last `minutes`, crossing the hour boundary when needed."""
-    keys = []
+    """Keys for the last `minutes`, crossing the hour boundary when needed.
+
+    Returns (keys, listing_failed). The second half is the point: a bucket
+    listing that threw used to be indistinguishable from an hour with no
+    files, and an empty strikes array stamped with a fresh time is
+    indistinguishable from a clear sky. The app treats an empty cell as
+    unknown either way (D-92), so this never reaches a rating; it decides
+    whether the *stamp* may say the run looked.
+    """
+    keys, failed = [], False
     for back in range(0, minutes // 60 + 2):
         t = now - timedelta(hours=back)
         prefix = f"GLM-L2-LCFA/{t.year}/{t.timetuple().tm_yday:03d}/{t.hour:02d}/"
         try:
             keys += list_keys(bucket, prefix)
         except Exception as e:
+            failed = True
             print(f"  {bucket} {prefix}: {e}", file=sys.stderr)
     cutoff = now - timedelta(minutes=minutes)
-    return [k for k in keys if (started_at(k) or now) >= cutoff]
+    return [k for k in keys if (started_at(k) or now) >= cutoff], failed
 
 
 def flashes_in(bucket, key):
@@ -91,8 +102,11 @@ def flashes_in(bucket, key):
             # app displays.
             t0 = started_at(key)
     except Exception as e:
+        # None, not []: an empty list means "read it, no flashes in bounds";
+        # None means "did not read it". The two used to be the same value, so
+        # a run whose every download failed counted as a run that looked.
         print(f"  skip {key.split('/')[-1]}: {e}", file=sys.stderr)
-        return []
+        return None
 
     keep = ((lat >= BOUNDS["south"]) & (lat <= BOUNDS["north"])
             & (lon >= BOUNDS["west"]) & (lon <= BOUNDS["east"]))
@@ -144,12 +158,53 @@ def main():
     # still being written when the last run listed the bucket would otherwise
     # never be picked up.
     fetch_minutes = args.minutes if not kept else args.fetch_minutes
+    reads, listing_failed = {b: 0 for b in SATELLITES}, False
     for bucket in SATELLITES:
-        keys = recent_keys(bucket, fetch_minutes, now)
+        keys, failed = recent_keys(bucket, fetch_minutes, now)
+        listing_failed = listing_failed or failed
         print(f"{bucket}: {len(keys)} files in the last {fetch_minutes} min")
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             for got in pool.map(lambda k: flashes_in(bucket, k), keys):
+                if got is None:
+                    continue
                 strikes.extend(got)
+                reads[bucket] += 1
+    files_read = sum(reads.values())
+
+    # Did this run actually look? GLM publishes a file every twenty seconds
+    # per satellite, so a fifteen-minute fetch that read nothing did not see a
+    # quiet sky; it saw nothing. Then the stamp must not advance: the app's
+    # 30-minute staleness rule keys off generatedAt, and a fresh stamp on an
+    # empty file is exactly "what's here is current" over a failed feed
+    # (app L-05). The previous stamp is carried forward when one exists (a
+    # true first run has nothing to carry and stamps now), the file says
+    # fetchFailed, and the run exits non-zero so the workflow records it.
+    # "Looked" means at least one satellite delivered files this run. The stamp
+    # advances on that alone: the two satellites do not see the same water,
+    # but a stale rule that hid live strikes from the working one thirty
+    # minutes into a one-satellite gap would be worse than a fresh stamp over
+    # water the other one missed (the app reads an empty cell as unknown
+    # either way). A one-satellite gap is still reported and still fails the
+    # step, so it is visible without being hidden from boaters.
+    looked = files_read > 0
+    partial = looked and any(n == 0 for n in reads.values())
+    global _FETCH_FAILED
+    _FETCH_FAILED = not looked or partial
+    previous_stamp = None
+    try:
+        with open(os.path.join(args.out, "index.json")) as f:
+            previous_stamp = json.load(f).get("generatedAt")
+    except Exception:
+        pass
+    if not looked:
+        print(f"WARNING: read {files_read} files"
+              f"{' after a listing failure' if listing_failed else ''}; "
+              f"keeping the previous stamp {previous_stamp}"
+              f"{' (none to keep: first run)' if not previous_stamp else ''}", file=sys.stderr)
+    elif partial:
+        quiet = [b for b, n in reads.items() if n == 0]
+        print(f"WARNING: no files read from {', '.join(quiet)}; stamp advances on the "
+              f"satellite(s) that delivered", file=sys.stderr)
 
     # Newest last, so the app can fade by age without sorting.
     # Deduplicate across the overlap, then oldest first so the app can fade by
@@ -159,7 +214,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     span_lon, span_lat = CELL_SPAN
-    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ") if looked or not previous_stamp else previous_stamp
     index, total_bytes = [], 0
 
     for name, west, south in CELL_ORIGINS:
@@ -177,6 +232,10 @@ def main():
             "bounds": {"south": south, "north": north, "west": west, "east": east},
             "strikes": [{"lat": a, "lon": o, "t": t} for a, o, t in inside],
         }
+        if not looked:
+            # Ignored by older app builds (the decoder is tolerant), read by
+            # nobody yet; here so a human looking at the file can tell.
+            cell["fetchFailed"] = True
         path = os.path.join(out_dir, f"{name}.json")
         with open(path, "w") as f:
             json.dump(cell, f, separators=(",", ":"))
@@ -189,8 +248,11 @@ def main():
     # layout, and so a dead run is visible as a stale generatedAt rather than
     # as an empty map.
     with open(os.path.join(out_dir, "index.json"), "w") as f:
-        json.dump({"generatedAt": stamp, "windowMinutes": args.minutes,
-                   "cells": index}, f, separators=(",", ":"))
+        index_doc = {"generatedAt": stamp, "windowMinutes": args.minutes,
+                     "cells": index}
+        if not looked:
+            index_doc["fetchFailed"] = True
+        json.dump(index_doc, f, separators=(",", ":"))
 
     busiest = max(index, key=lambda c: c["strikes"]) if index else None
     # Published, not fetched. Most of what comes back is over the interior,
@@ -208,3 +270,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # A run that read nothing exits non-zero so the workflow step's
+    # continue-on-error records a failure rather than a green tick over an
+    # empty sky. main() has already written the files with the old stamp.
+    # (Set by main via a module global to keep its signature.)
+    if globals().get("_FETCH_FAILED"):
+        sys.exit(2)
