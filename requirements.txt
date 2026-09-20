@@ -16,8 +16,14 @@
 # the renderer only ever runs on ubuntu-latest.
 eccodes==2.48.0
 eccodeslib==2.48.2.27; platform_system == "Linux"
-numpy>=1.26
-pillow>=10.4
-pyproj>=3.6
-scipy>=1.11
-h5py>=3.11
+#
+# The rest pinned 2026-09-20 for the same reason: `>=` on a scheduled job means
+# a stranger can change your code on their schedule. These are the exact
+# versions that run 1711 installed — the first green run after the outage,
+# verified green end to end including both deploys. Raise them deliberately,
+# together, after watching a run.
+numpy==2.5.3
+pillow==12.3.0
+pyproj==3.8.0
+scipy==1.18.1
+h5py==3.16.0
