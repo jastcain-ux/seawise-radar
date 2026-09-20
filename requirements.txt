@@ -1,4 +1,21 @@
-eccodes>=2.40
+# Pinned 2026-09-19, after 117 consecutive failed runs.
+#
+# Nothing here pinned the C library underneath `eccodes`. Its wheel declares
+#   Requires-Dist: eccodeslib; platform_system != "Windows"
+# with no version bound, so every run installed whatever ECMWF had published
+# most recently. The linux x86_64 wheel for eccodeslib 2.48.3.28 went up at
+# 17:16:48 UTC on 2026-09-18 — inside the 70 seconds between the last green
+# run starting (17:15:38) and the next one starting (17:29:13). Every run
+# since has rendered all 832 frames correctly and then aborted in its own
+# shutdown with "double free or corruption (!prev)", exit 134, which makes
+# GitHub discard the whole run: prune, cache, publish and both deploys.
+#
+# These are the builds that ran green for the ten days before that.
+# eccodeslib exact-pins its own eckitlib==2.2.0.27, so this pins the whole
+# C stack. Linux-only marker: ECMWF ships no macOS wheel for this build, and
+# the renderer only ever runs on ubuntu-latest.
+eccodes==2.48.0
+eccodeslib==2.48.2.27; platform_system == "Linux"
 numpy>=1.26
 pillow>=10.4
 pyproj>=3.6
