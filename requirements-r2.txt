@@ -1,0 +1,13 @@
+# The R2 publisher's packages only (publish_r2.py, SeaWise D-199), installed in its
+# own jobs so the render jobs' set above never changes for it.
+#
+# Every package pinned exactly, the whole tree, for the reason requirements.txt
+# gives: `>=` on a scheduled job lets someone else change it on their schedule.
+# These are the newest releases on 2026-10-04 that support Python 3.12.
+boto3==1.43.108
+botocore==1.43.108
+s3transfer==0.19.2
+jmespath==1.1.0
+python-dateutil==2.9.0.post0
+six==1.17.0
+urllib3==2.8.0

@@ -129,3 +129,45 @@ python prune.py --dir public/observed         # drop anything the manifest dropp
 
 Frames already on disk are reused, so a ten-minute run pulls one new frame
 rather than re-rendering the lot.
+
+## publish_r2.py — the copy in Cloudflare R2
+
+Since 2026-10-04 (SeaWise D-199) every run also copies both sites it gives
+GitHub Pages into the R2 bucket `seawise-radar`, served at
+`https://radar.seawiseweather.com` with the same paths. The app reads that
+address from 1.1; GitHub Pages keeps publishing for every older build.
+
+- **Its own jobs**, `r2-measured` and `r2-full`, each unpacking the Pages
+  artifact its deploy uses. No deploy needs them, and a failure leaves the run
+  green with an error line. **They must stay short:** runs go one at a time, so
+  the next run's Pages deploys wait for them. Each call has a 5 s connect and
+  10 s read timeout and one retry, a publish stops at a 120 s deadline before its
+  next stage, and each job has a 4-minute timeout.
+- **The order:** changed frames, then the manifests and `lightning/index.json`
+  only if every frame landed, then deletes. "Changed" is by content (R2's ETag
+  is the MD5 of a single-part upload), never by size or time.
+- **The check:** after each publish the bucket is listed again and must hold
+  exactly the run's files.
+- **Safety:** it refuses a directory without `manifest.json` and
+  `observed/manifest.json`, and, once the bucket holds 100 objects or more, one
+  with under half as many files as the bucket. (Never a share of deletes: after a
+  gap of a few hours nearly half the names change, and that publish must go
+  through. And a layer missing from the site, its step having failed, is dropped
+  from R2 as Pages drops it.)
+- **Deletes** are one `DeleteObject` per key: free on R2, and no body checksum.
+- **Secrets:** `R2_ENDPOINT` (the account's S3 endpoint,
+  `https://<account id>.r2.cloudflarestorage.com`, with no bucket on the end),
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (a token for this bucket only,
+  Object Read & Write), given to the publish step alone. Without them the jobs
+  print a warning and publish nothing.
+- **Cache headers:** manifests and the lightning index `max-age=60`, everything
+  else `max-age=600`. Cloudflare's cache rule for the hostname tells browsers to
+  respect them (the zone's default would stretch them to four hours).
+
+```bash
+python -m unittest test_publish_r2                 # against an in-memory bucket
+R2_ENDPOINT=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \
+  python publish_r2.py --dir public              # by hand, with the token's keys
+```
+
+Its packages are pinned in `requirements-r2.txt`, installed only in its jobs.

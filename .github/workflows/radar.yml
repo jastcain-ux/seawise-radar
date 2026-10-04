@@ -287,3 +287,97 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           artifact_name: pages-full
+
+  # The same two sites copied into Cloudflare R2 behind radar.seawiseweather.com
+  # (SeaWise D-199), which the app reads from 1.1. GitHub Pages stays the host
+  # for every build that reads it, so these jobs are kept apart from it: each
+  # starts only after its Pages artifact exists, neither is ever needed by a
+  # deploy, and a failure in either leaves the run green (continue-on-error) with
+  # an error line in its summary. Each publishes exactly what its Pages deploy
+  # publishes, by unpacking the same artifact. publish_r2.py holds the order:
+  # frames, then manifests, then deletes, stopping at the first failure. One
+  # cost remains: runs go one at a time, so the next run starts after these
+  # finish. Normally that is under a minute after deploy-full; with R2 slow or
+  # down the script's deadline and these timeouts hold it to a few minutes.
+  r2-measured:
+    needs: measured
+    runs-on: ubuntu-latest
+    # Short on purpose: the next run waits for this one (publish_r2.py, top).
+    timeout-minutes: 4
+    continue-on-error: true
+    # Reads its own repo and this run's artifacts; never Pages or the OIDC token.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-r2.txt
+
+      - name: Install
+        run: pip install -r requirements-r2.txt
+
+      - name: Unit tests for the R2 publisher
+        run: python -m unittest test_publish_r2
+
+      - name: Take the measured half as Pages got it
+        uses: actions/download-artifact@v4
+        with:
+          name: pages-measured
+          path: artifact
+
+      - name: Unpack it
+        run: mkdir site && tar -xf artifact/artifact.tar -C site
+
+      - name: Publish the measured half to R2
+        # The write keys reach this step alone, not checkout, pip or the tests.
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python publish_r2.py --dir site
+
+  r2-full:
+    # After the measured copy, never before it, as deploy-full follows
+    # deploy-measured: this site is a superset of that one. It still runs when
+    # the measured copy failed, so one bad publish is mended by the next.
+    needs: [forecast, r2-measured]
+    if: ${{ !cancelled() && needs.forecast.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Short on purpose: the next run waits for this one (publish_r2.py, top).
+    timeout-minutes: 4
+    continue-on-error: true
+    # Reads its own repo and this run's artifacts; never Pages or the OIDC token.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-r2.txt
+
+      - name: Install
+        run: pip install -r requirements-r2.txt
+
+      - name: Take everything as Pages got it
+        uses: actions/download-artifact@v4
+        with:
+          name: pages-full
+          path: artifact
+
+      - name: Unpack it
+        run: mkdir site && tar -xf artifact/artifact.tar -C site
+
+      - name: Publish everything to R2
+        # The write keys reach this step alone, not checkout, pip or the tests.
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python publish_r2.py --dir site
