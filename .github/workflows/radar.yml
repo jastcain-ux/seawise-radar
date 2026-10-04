@@ -61,9 +61,15 @@ permissions:
   pages: write
   id-token: write
 
+# Every job runs on ubuntu-24.04 by name, never ubuntu-latest. GitHub begins
+# moving ubuntu-latest to Ubuntu 26 on 2026-10-19 (its notice in this
+# workflow's runs, 2026-10-04); the renderer's pins (requirements.txt) were
+# proven on 24.04 (image 20260927.320.1 on 2026-10-04), and a change under it
+# is a change made on someone else's schedule. Move it deliberately, after
+# watching a run.
 jobs:
   measured:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -153,7 +159,7 @@ jobs:
 
   deploy-measured:
     needs: measured
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -165,7 +171,7 @@ jobs:
 
   forecast:
     needs: measured
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -278,7 +284,7 @@ jobs:
     # After the measured deploy, never before it: this site is a superset of
     # that one, and Pages serves whichever deploy landed last.
     needs: [forecast, deploy-measured]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -301,7 +307,7 @@ jobs:
   # down the script's deadline and these timeouts hold it to a few minutes.
   r2-measured:
     needs: measured
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Short on purpose: the next run waits for this one (publish_r2.py, top).
     timeout-minutes: 4
     continue-on-error: true
@@ -346,7 +352,7 @@ jobs:
     # the measured copy failed, so one bad publish is mended by the next.
     needs: [forecast, r2-measured]
     if: ${{ !cancelled() && needs.forecast.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Short on purpose: the next run waits for this one (publish_r2.py, top).
     timeout-minutes: 4
     continue-on-error: true
