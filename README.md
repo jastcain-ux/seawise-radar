@@ -158,8 +158,9 @@ address from 1.1; GitHub Pages keeps publishing for every older build.
 - **Secrets:** `R2_ENDPOINT` (the account's S3 endpoint,
   `https://<account id>.r2.cloudflarestorage.com`, with no bucket on the end),
   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (a token for this bucket only,
-  Object Read & Write), given to the publish step alone. Without them the jobs
-  print a warning and publish nothing.
+  Object Read & Write), given to the publish step alone; spaces and line breaks
+  around a pasted value are ignored. Without them the jobs print a warning and
+  publish nothing.
 - **Cache headers:** manifests and the lightning index `max-age=60`, everything
   else `max-age=600`. Cloudflare's cache rule for the hostname tells browsers to
   respect them (the zone's default would stretch them to four hours).

@@ -1,5 +1,7 @@
 """The R2 publisher's order and safety, against an in-memory bucket (no network, no boto3)."""
+import contextlib
 import hashlib
+import io
 import os
 import tempfile
 import time
@@ -162,14 +164,36 @@ class PublishSafety(unittest.TestCase):
         try:
             import sys
             argv, sys.argv = sys.argv, ["publish_r2.py", "--dir", site(BASE)]
+            out = io.StringIO()  # held back, or the workflow reads the warning as its own
             try:
-                self.assertEqual(p.main(), 0)
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(p.main(), 0)
             finally:
                 sys.argv = argv
+            self.assertIn("R2 not configured", out.getvalue())
         finally:
             for n, v in saved.items():
                 if v is not None:
                     os.environ[n] = v
+
+
+class Secrets(unittest.TestCase):
+    def test_line_breaks_and_spaces_pasted_with_a_secret_are_removed(self):
+        got = p.settings_from_env({
+            "R2_ENDPOINT": " https://acct.r2.cloudflarestorage.com\n",
+            "R2_ACCESS_KEY_ID": "abc123\n",
+            "R2_SECRET_ACCESS_KEY": "\tsecret \r\n",
+        })
+        self.assertEqual(got, {
+            "R2_ENDPOINT": "https://acct.r2.cloudflarestorage.com",
+            "R2_ACCESS_KEY_ID": "abc123",
+            "R2_SECRET_ACCESS_KEY": "secret",
+        })
+
+    def test_a_blank_secret_counts_as_unset(self):
+        got = p.settings_from_env({"R2_ENDPOINT": "\n", "R2_ACCESS_KEY_ID": "x"})
+        self.assertEqual(got["R2_ENDPOINT"], "")
+        self.assertEqual(got["R2_SECRET_ACCESS_KEY"], "")
 
 
 if __name__ == "__main__":

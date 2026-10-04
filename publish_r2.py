@@ -186,15 +186,29 @@ def publish(client, bucket, root, workers=16, log=print, deadline_s=DEADLINE_S):
     return 0
 
 
-def client_from_env():
+SECRETS = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+
+
+def settings_from_env(environ):
+    """The three secrets, with any spaces or line breaks around them removed.
+
+    A value pasted into GitHub's secret box keeps the line break of an Enter
+    pressed after it; in a key that breaks every request's signature header
+    (the first run with secrets, 2026-10-04: "Invalid header value"). Unset or
+    blank ones come back as "".
+    """
+    return {n: (environ.get(n) or "").strip() for n in SECRETS}
+
+
+def client_from_env(settings):
     import boto3
     from botocore.config import Config
 
     return boto3.client(
         "s3",
-        endpoint_url=os.environ["R2_ENDPOINT"],
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        endpoint_url=settings["R2_ENDPOINT"],
+        aws_access_key_id=settings["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=settings["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
         config=Config(
             # Some SDK versions send checksum headers R2 rejects; this script
@@ -218,13 +232,13 @@ def main():
     ap.add_argument("--workers", type=int, default=16)
     args = ap.parse_args()
 
-    names = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
-    absent = [n for n in names if not os.environ.get(n)]
+    settings = settings_from_env(os.environ)
+    absent = [n for n in SECRETS if not settings[n]]
     if absent:
         print(f"::warning::R2 not configured ({', '.join(absent)} unset); nothing published to R2")
         return 0
     try:
-        return publish(client_from_env(), args.bucket, args.dir, args.workers)
+        return publish(client_from_env(settings), args.bucket, args.dir, args.workers)
     except Exception as err:  # one line in the run's summary, then a failed step
         print(f"::error::R2 publish stopped: {err}")
         return 1
