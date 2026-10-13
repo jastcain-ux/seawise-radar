@@ -24,8 +24,8 @@ class FakeBucket:
         bucket = self
 
         class Pager:
-            def paginate(self, Bucket):
-                keys = sorted(bucket.objects)
+            def paginate(self, Bucket, Prefix=""):
+                keys = sorted(k for k in bucket.objects if k.startswith(Prefix))
                 for i in range(0, len(keys), 2):  # small pages, so paging is exercised
                     yield {"Contents": [{"Key": k, "ETag": '"%s"' % hashlib.md5(bucket.objects[k]).hexdigest()}
                                         for k in keys[i:i + 2]]}
@@ -194,6 +194,45 @@ class Secrets(unittest.TestCase):
         got = p.settings_from_env({"R2_ENDPOINT": "\n", "R2_ACCESS_KEY_ID": "x"})
         self.assertEqual(got["R2_ENDPOINT"], "")
         self.assertEqual(got["R2_SECRET_ACCESS_KEY"], "")
+
+
+class PrefixTests(unittest.TestCase):
+    """The forecast's regional tier under its own prefix (radar build 7, item 11)."""
+
+    REGIONAL = {"forecast-regional/manifest.json": b'{"frames":["forecast-regional/r-refc-0015-x.png"]}',
+                "forecast-regional/r-refc-0015-x.png": b"regional"}
+
+    def test_a_prefixed_publish_touches_only_its_part_of_the_bucket(self):
+        bucket = FakeBucket({**BASE, "forecast-regional/old-refc-0015-w.png": b"stale"})
+        root = site({"manifest.json": self.REGIONAL["forecast-regional/manifest.json"],
+                     "r-refc-0015-x.png": b"regional"})
+        self.assertEqual(p.publish(bucket, "b", root, log=lambda *_: None, prefix="forecast-regional/"), 0)
+        self.assertEqual([c[1] for c in bucket.calls if c[0] == "put"],
+                         ["forecast-regional/r-refc-0015-x.png", "forecast-regional/manifest.json"])
+        self.assertEqual([c[1] for c in bucket.calls if c[0] == "delete"], ["forecast-regional/old-refc-0015-w.png"])
+        for key in BASE:
+            self.assertIn(key, bucket.objects, "the main site is untouched")
+
+    def test_the_main_publish_leaves_the_ignored_prefix_alone(self):
+        bucket = FakeBucket({**BASE, **self.REGIONAL})
+        root = site(BASE)
+        self.assertEqual(p.publish(bucket, "b", root, log=lambda *_: None, ignore=("forecast-regional/",)), 0)
+        self.assertEqual([c for c in bucket.calls if c[0] == "delete"], [])
+        for key in self.REGIONAL:
+            self.assertIn(key, bucket.objects)
+
+    def test_without_the_ignore_the_main_publish_would_delete_the_tier(self):
+        # The reason the ignore exists: pinned so a dropped flag shows up as a failed test, not a 404 on a phone.
+        bucket = FakeBucket({**BASE, **self.REGIONAL})
+        p.publish(bucket, "b", site(BASE), log=lambda *_: None)
+        self.assertEqual(sorted(c[1] for c in bucket.calls if c[0] == "delete"), sorted(self.REGIONAL))
+
+    def test_a_prefixed_site_needs_only_its_own_manifest(self):
+        bucket = FakeBucket(BASE)
+        self.assertEqual(p.publish(bucket, "b", site({"r-refc-0015-x.png": b"x"}), log=lambda *_: None,
+                                   prefix="forecast-regional/"), 1, "no manifest: refused")
+        self.assertEqual(p.publish(bucket, "b", site({"manifest.json": b"{}", "r-refc-0015-x.png": b"x"}),
+                                   log=lambda *_: None, prefix="forecast-regional/"), 0)
 
 
 if __name__ == "__main__":

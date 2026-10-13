@@ -175,6 +175,10 @@ jobs:
     needs: measured
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # actions: write for one step, the dispatch of the regional tier's workflow.
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
 
@@ -216,6 +220,18 @@ jobs:
             echo "forecast manifest is current; skipping"
             echo "rendered=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # The forecast's regional tier (radar build 7, item 11) renders in a
+      # workflow of its own, started here with the run this job rendered, so
+      # both come from one run and the tier lands minutes after the forecast.
+      # Its 432 pictures in this job would push the run past the 15-minute
+      # slot; the outside timer starts only this workflow (D-169).
+      - name: Start the regional tier's workflow for the same run
+        if: steps.forecast.outputs.rendered == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run forecast-regional.yml --ref "${{ github.ref_name }}" -f run="$(cat hrrr-run.txt)"
 
       # Wind vectors, only when the forecast frames were re-rendered — both
       # come from the same HRRR run, so re-pulling wind on a tick that skipped
@@ -314,7 +330,7 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: python publish_r2.py --dir site
+        run: python publish_r2.py --dir site --ignore-prefix forecast-regional/
 
   r2-full:
     # After the measured copy, never before it, as deploy-full follows
@@ -356,4 +372,4 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: python publish_r2.py --dir site
+        run: python publish_r2.py --dir site --ignore-prefix forecast-regional/

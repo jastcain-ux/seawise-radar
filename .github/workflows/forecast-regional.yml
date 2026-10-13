@@ -1,0 +1,79 @@
+# The forecast's regional tier (SeaWise radar build 7, item 11; D-232, B-76):
+# 12 pictures of 24 degrees for each of the 36 leads of one HRRR run, under
+# forecast-regional/ in R2, with a manifest of its own.
+#
+# A workflow of its own, not a job in radar.yml: that workflow's concurrency
+# group holds the next timer start until every job of a run has ended, so a
+# 7-minute tier job there would stretch every cycle past the 15-minute slot;
+# and its publishes delete every bucket key the site lacks, so the tier lives
+# under a prefix those publishes are told to ignore (publish_r2.py). It is
+# started by radar.yml's forecast job with the run it rendered, so both come
+# from one run; the app draws the tier only when its runTime matches the
+# forecast manifest's. No GitHub Pages: 1.0 (12) reads Pages and never sees
+# the tier; 1.1 reads R2 (SeaWise D-205).
+name: SeaWise radar, regional forecast tier
+
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "The HRRR run as YYYYMMDDHH; blank for the newest complete one"
+        required: false
+        default: ""
+
+concurrency:
+  group: seawise-radar-forecast-regional
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  regional:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-r2.txt
+
+      - name: Install
+        run: pip install -r requirements.txt -r requirements-r2.txt
+
+      - name: Unit tests for the renderer maths and the publisher
+        run: python -m unittest test_cells test_render test_gate test_prune test_publish_r2
+
+      # The previous set is carried so prune.py can keep it an hour (item 21).
+      - name: Restore the published tier
+        uses: actions/cache/restore@v4
+        with:
+          path: site/forecast-regional
+          key: seawise-radar-forecast-regional-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: seawise-radar-forecast-regional-
+
+      - name: Render the regional tier
+        env:
+          HRRR_RUN: ${{ inputs.run }}
+        run: python render.py --regional --out site/forecast-regional
+
+      - name: Prune pictures the timeline can no longer reach, an hour after their publication
+        run: python prune.py --dir site/forecast-regional --keep-newer-than 60
+
+      - name: Carry the tier to the next run
+        uses: actions/cache/save@v4
+        with:
+          path: site/forecast-regional
+          key: seawise-radar-forecast-regional-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Publish the tier to R2 under its own prefix
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python publish_r2.py --dir site/forecast-regional --prefix forecast-regional/

@@ -30,6 +30,13 @@ fails unless it holds this run's files exactly.
 
 Without its three secrets it says so and does nothing, so the workflow can carry
 this before the bucket exists.
+
+**Prefixes (SeaWise radar build 7, item 11).** The forecast's regional tier is
+rendered by a workflow of its own and published under `forecast-regional/`:
+`--prefix forecast-regional/` lists, puts, deletes and checks that part of the
+bucket alone (its required pointer is its own `manifest.json`), and the main
+workflow's publishes pass `--ignore-prefix forecast-regional/` so they never
+delete it or count it as extra.
 """
 import argparse
 import hashlib
@@ -93,12 +100,21 @@ def local_files(root):
     return out
 
 
-def remote_files(client, bucket):
-    """Every object in the bucket, as key -> ETag without its quotes."""
+def remote_files(client, bucket, prefix="", ignore=()):
+    """Every object in the bucket (under `prefix`, if given) as key -> ETag without its quotes,
+    leaving out keys under any of `ignore`."""
     out = {}
-    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket):
+    kwargs = {"Bucket": bucket}
+    if prefix:
+        kwargs["Prefix"] = prefix
+    for page in client.get_paginator("list_objects_v2").paginate(**kwargs):
         for obj in page.get("Contents", []):
-            out[obj["Key"]] = obj["ETag"].strip('"')
+            key = obj["Key"]
+            if any(key.startswith(p) for p in ignore):
+                continue
+            if prefix and not key.startswith(prefix):
+                continue
+            out[key] = obj["ETag"].strip('"')
     return out
 
 
@@ -111,9 +127,9 @@ def plan(local, remote):
     return frames, pointers, deletes
 
 
-def check_site(local, remote):
+def check_site(local, remote, required=REQUIRED):
     """Refuse a directory that is not a whole site. Returns a reason, or None."""
-    missing = [k for k in REQUIRED if k not in local]
+    missing = [k for k in required if k not in local]
     if missing:
         return f"the site lacks {', '.join(missing)}"
     if len(remote) >= GUARD_FROM and len(local) < len(remote) / 2:
@@ -121,8 +137,9 @@ def check_site(local, remote):
     return None
 
 
-def put(client, bucket, root, key):
-    with open(os.path.join(root, key), "rb") as f:
+def put(client, bucket, root, key, prefix=""):
+    local = key[len(prefix):] if prefix and key.startswith(prefix) else key
+    with open(os.path.join(root, local), "rb") as f:
         client.put_object(
             Bucket=bucket,
             Key=key,
@@ -132,20 +149,20 @@ def put(client, bucket, root, key):
         )
 
 
-def delete(client, bucket, root, key):
+def delete(client, bucket, root, key, prefix=""):
     # One DeleteObject per key, never DeleteObjects: R2 does not bill deletes,
     # and DeleteObjects needs a body checksum whose kind R2 may not accept.
     client.delete_object(Bucket=bucket, Key=key)
 
 
-def run_all(action, client, bucket, root, keys, workers, deadline, what):
+def run_all(action, client, bucket, root, keys, workers, deadline, what, prefix=""):
     """Do action for every key; the first failure, or the deadline, stops the rest and raises."""
     if not keys:
         return
     if time.monotonic() > deadline:
         raise TimeoutError(f"past the {DEADLINE_S} s deadline before {what}; the next run carries on")
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(action, client, bucket, root, k): k for k in keys}
+        futures = {pool.submit(action, client, bucket, root, k, prefix): k for k in keys}
         try:
             for fut in as_completed(futures):
                 err = fut.exception()
@@ -159,23 +176,30 @@ def run_all(action, client, bucket, root, keys, workers, deadline, what):
             raise
 
 
-def publish(client, bucket, root, workers=16, log=print, deadline_s=DEADLINE_S):
-    """Publish root to the bucket in the safe order, then check it. Returns 0 or 1."""
+def publish(client, bucket, root, workers=16, log=print, deadline_s=DEADLINE_S, prefix="", ignore=()):
+    """Publish root to the bucket in the safe order, then check it. Returns 0 or 1.
+
+    With `prefix`, root is published under it and only that part of the bucket
+    is read, deleted or checked; with `ignore`, keys under those prefixes are
+    left alone (another workflow's).
+    """
     deadline = time.monotonic() + deadline_s
-    local = local_files(root)
-    remote = remote_files(client, bucket)
-    reason = check_site(local, remote)
+    local = {prefix + k: v for k, v in local_files(root).items()}
+    remote = remote_files(client, bucket, prefix, ignore)
+    required = tuple(prefix + "manifest.json" for _ in [0]) if prefix else REQUIRED
+    reason = check_site(local, remote, required)
     if reason:
         log(f"::error::R2: refusing to publish {root}: {reason}; nothing changed")
         return 1
     frames, pointers, deletes = plan(local, remote)
-    log(f"R2: {len(local)} files here, {len(remote)} in the bucket; "
+    where = f" under {prefix}" if prefix else ""
+    log(f"R2{where}: {len(local)} files here, {len(remote)} in the bucket; "
         f"{len(frames)} frames and {len(pointers)} pointers to put, {len(deletes)} to delete")
-    run_all(put, client, bucket, root, frames, workers, deadline, "putting frames")
-    run_all(put, client, bucket, root, pointers, workers, deadline, "putting pointers")
-    run_all(delete, client, bucket, root, deletes, workers, deadline, "deleting")
+    run_all(put, client, bucket, root, frames, workers, deadline, "putting frames", prefix)
+    run_all(put, client, bucket, root, pointers, workers, deadline, "putting pointers", prefix)
+    run_all(delete, client, bucket, root, deletes, workers, deadline, "deleting", prefix)
 
-    after = remote_files(client, bucket)
+    after = remote_files(client, bucket, prefix, ignore)
     wrong = sorted(k for k in local if after.get(k) != local[k])
     extra = sorted(k for k in after if k not in local)
     if wrong or extra:
@@ -230,7 +254,12 @@ def main():
     ap.add_argument("--dir", required=True)
     ap.add_argument("--bucket", default=os.environ.get("R2_BUCKET", "seawise-radar"))
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--prefix", default="", help="publish under this key prefix and touch only it (ends in /)")
+    ap.add_argument("--ignore-prefix", action="append", default=[], metavar="PREFIX",
+                    help="leave keys under this prefix alone (another workflow's); may repeat")
     args = ap.parse_args()
+    if args.prefix and not args.prefix.endswith("/"):
+        args.prefix += "/"
 
     settings = settings_from_env(os.environ)
     absent = [n for n in SECRETS if not settings[n]]
@@ -238,7 +267,8 @@ def main():
         print(f"::warning::R2 not configured ({', '.join(absent)} unset); nothing published to R2")
         return 0
     try:
-        return publish(client_from_env(settings), args.bucket, args.dir, args.workers)
+        return publish(client_from_env(settings), args.bucket, args.dir, args.workers,
+                       prefix=args.prefix, ignore=tuple(args.ignore_prefix))
     except Exception as err:  # one line in the run's summary, then a failed step
         print(f"::error::R2 publish stopped: {err}")
         return 1

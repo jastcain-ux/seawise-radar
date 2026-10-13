@@ -40,7 +40,8 @@ from pyproj import CRS, Transformer
 
 from cells import (FORECAST_CELL_ORIGINS, FORECAST_CELL_SPAN,
                    FORECAST_CELL_SIZE, NATIONAL_BBOX, NATIONAL_ID,
-                   NATIONAL_SIZE)
+                   NATIONAL_SIZE, FORECAST_REGIONAL_PX_PER_DEGREE,
+                   FORECAST_REGIONAL_SIZE, regional_cells)
 from smoothing import shape  # noqa: E402
 from edges import edge_weight  # noqa: E402
 from peaks import band_tops, pixels_of, halo_bbox  # noqa: E402
@@ -514,6 +515,8 @@ def main():
     ap.add_argument("--out", default="out", help="directory to write frames into")
     ap.add_argument("--only", default="", help="render just this cell, for checking one place")
     ap.add_argument("--limit", type=int, default=0, help="render at most this many lead times")
+    ap.add_argument("--regional", action="store_true",
+                    help="render the regional tier alone, with its own manifest (radar build 7, item 11)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -532,11 +535,20 @@ def main():
     # Regional cells at their own size, plus one national frame at the model's
     # own resolution. Carried as (name, bbox, size) so the national one can be
     # a different shape without a second code path.
-    wanted_cells = [(n, b, FORECAST_CELL_SIZE)
-                    for n, b in cells()
-                    if not args.only or n == args.only]
-    if not args.only or args.only == NATIONAL_ID:
-        wanted_cells.append((NATIONAL_ID, NATIONAL_BBOX, NATIONAL_SIZE))
+    # The regional tier is rendered by a workflow of its own, into its own
+    # manifest (the same shape as this one, with `pxPerDegree`): 432 pictures
+    # a run would push the main run past the 15-minute slot. The app draws
+    # it only when its runTime matches the forecast's.
+    if args.regional:
+        wanted_cells = [(n, b, FORECAST_REGIONAL_SIZE)
+                        for n, b in regional_cells()
+                        if not args.only or n == args.only]
+    else:
+        wanted_cells = [(n, b, FORECAST_CELL_SIZE)
+                        for n, b in cells()
+                        if not args.only or n == args.only]
+        if not args.only or args.only == NATIONAL_ID:
+            wanted_cells.append((NATIONAL_ID, NATIONAL_BBOX, NATIONAL_SIZE))
     leads = FORECAST_MINUTES[:args.limit] if args.limit else FORECAST_MINUTES
 
     frames, downloaded = [], 0
@@ -591,7 +603,7 @@ def main():
         "source": "NOAA NCEP, public domain",
         "runTime": run_at.isoformat().replace("+00:00", "Z"),
         "generatedAt": published_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "size": {"width": FORECAST_CELL_SIZE[0], "height": FORECAST_CELL_SIZE[1]},
+        "size": {"width": wanted_cells[0][2][0], "height": wanted_cells[0][2][1]},
         "dbzFloor": RAMP[0][0],
         # Recorded so the workflow can tell when the picture's own rule changed.
         # The re-render gate fires on manifest age and on the cell list; a
@@ -609,6 +621,9 @@ def main():
                   for name, b, _ in wanted_cells],
         "frames": frames,
     }
+    if args.regional:
+        manifest["tier"] = "regional"
+        manifest["pxPerDegree"] = FORECAST_REGIONAL_PX_PER_DEGREE
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
     print(f"{len(leads)} lead times x {len(wanted_cells)} cells = {len(frames)} frames, "
