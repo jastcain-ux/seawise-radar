@@ -180,7 +180,11 @@ jobs:
       contents: read
       actions: write
     steps:
+      # The write token is for the dispatch step alone, which reads GH_TOKEN; kept out of `.git/config`, so the
+      # renderer and its pinned packages never run with it readable (build 7's renderer reader, N-6.1).
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
