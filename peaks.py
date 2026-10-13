@@ -40,13 +40,36 @@ def band_tops(field, edges):
         areas, count = ndimage.label(field >= edge)
         if count == 0:
             continue
-        tops = ndimage.maximum_position(field, areas, index=list(range(1, count + 1)))
-        for r, c in tops:
+        for r, c in zip(*area_tops(field, areas, count)):
             if (r, c) not in seen:
                 seen.add((r, c))
                 rows.append(int(r))
                 cols.append(int(c))
     return np.array(rows, dtype=int), np.array(cols, dtype=int)
+
+
+def area_tops(field, areas, count):
+    """(rows, cols) of each labelled area's top: its first highest pixel in row order.
+
+    Decided here and not by scipy: `ndimage.maximum_position` breaks a tie
+    between equal pixels differently from one release to the next (1.13 gave
+    the first in row order, 1.18 another), so the same field had its top on
+    one row on this Mac and the next row on the runner, and a rule read two
+    ways is a rule nobody can test. One rule for the step's tops and for a
+    picture restored on its own (`smoothing.restore_peaks`).
+    """
+    mask = areas > 0
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return np.array([], dtype=int), np.array([], dtype=int)
+    lab = areas.ravel()[idx]
+    val = field.ravel()[idx]
+    order = np.lexsort((idx, -val, lab))
+    lab_sorted = lab[order]
+    first = np.ones(len(order), dtype=bool)
+    first[1:] = lab_sorted[1:] != lab_sorted[:-1]
+    rows, cols = np.unravel_index(idx[order][first], field.shape)
+    return rows.astype(int), cols.astype(int)
 
 
 def pixels_of(lats, lons, bbox, size):

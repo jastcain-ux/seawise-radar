@@ -82,9 +82,10 @@ def restore_peaks(original, smoothed, cell_px, floor=35.0, tops=None):
         cores, count = ndimage.label(original >= floor)
         if count == 0:
             return smoothed
-        found = ndimage.maximum_position(original, cores, index=list(range(1, count + 1)))
-        ys = np.array([t[0] for t in found], dtype=int)
-        xs = np.array([t[1] for t in found], dtype=int)
+        # The same top as the step's rule finds (`peaks.area_tops`): the
+        # first highest pixel in row order, never scipy's own tie-break.
+        from peaks import area_tops
+        ys, xs = area_tops(original, cores, count)
     else:
         ys, xs = (np.asarray(tops[0], dtype=int), np.asarray(tops[1], dtype=int))
         if ys.size == 0:
