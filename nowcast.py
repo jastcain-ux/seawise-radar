@@ -192,6 +192,7 @@ def advect(field, vy, vx, minutes):
 
 
 _FIELD = _META = _OUT = _STAMP = None
+_TOPS = None          # the projected field's cores, once per lead (item 19)
 
 
 def _render_one(cell):
@@ -203,7 +204,8 @@ def _render_one(cell):
             px = NOWCAST_MID_SIZE
         else:
             px = NOWCAST_CLOSE_SIZE
-        image = observed.render(_FIELD, _META, bbox, px)
+        image = observed.render(_FIELD, _META, bbox, px, tops=_TOPS,
+                                block=observed.NATIONAL_BLOCK_CELLS if name == NATIONAL_ID else None)
         image.save(os.path.join(_OUT, f"{name}-{_STAMP}.png"), optimize=True)
         return name, True, None
     except Exception as e:                                  # noqa: BLE001
@@ -259,13 +261,14 @@ def main():
 
     frames = []
     seen_cells = {}
-    global _FIELD, _META, _OUT, _STAMP
+    global _FIELD, _META, _OUT, _STAMP, _TOPS
     _META, _OUT = meta, args.out
     for minutes in LEAD_MINUTES:
         wanted = [c for c in tiers(minutes) if not args.only or c[0] == args.only]
         for n, b in wanted:
             seen_cells[n] = b
         _FIELD = advect(curr, vy, vx, minutes)
+        _TOPS = observed.grid_tops(_FIELD, meta)
         _STAMP = f"{stamp}-{minutes:03d}"
         when = t_curr + datetime.timedelta(minutes=minutes)
         with Pool() as pool:

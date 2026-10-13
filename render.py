@@ -43,6 +43,7 @@ from cells import (FORECAST_CELL_ORIGINS, FORECAST_CELL_SPAN,
                    NATIONAL_SIZE)
 from smoothing import shape  # noqa: E402
 from edges import edge_weight  # noqa: E402
+from peaks import band_tops, pixels_of, halo_bbox  # noqa: E402
 
 NOMADS = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hrrr/prod"
 MERCATOR_R = 20037508.342789244
@@ -125,18 +126,26 @@ BANDS = True
 # gates compare it: "-r2" is the point-bump peak restoration that replaced the
 # maximum-filter plateaus (L-69). Bump it whenever the picture's rule changes
 # without a manifest key of its own, or the old frames stay published.
-PALETTE = "twc-2-bands-r3"   # r3: peaks restored from 35 dBZ, not 40
+PALETTE = "twc-2-bands-r4"   # r4: every core's top kept, the light showers kept (build 7, item 19); r3: peaks restored from 35 dBZ, not 40
 
 
 # Set before the pool forks, read inside the workers. See `observed.py`.
 _VALUES = _META = _OUT = _MINUTES = None
+_TOPS = None          # (lats, lons) of the step's cores, found once on the model grid
+
+# The restore floor: where the ramp leaves green (D-66, amended 2026-09-02).
+RESTORE_FLOOR_DBZ = 35.0
+# Each picture is shaped with this many pixels of margin on every side and
+# cropped back, so its edge pixels are shaped as the middle ones are
+# (item 19): four sigma plus the bump's reach is under 24 px on every tier.
+SHAPE_HALO_PX = 24
 
 
 def _render_one(cell):
     """Render one cell of the lead time the pool was forked for."""
     name, bbox, size = cell
     try:
-        image = render(_VALUES, _META, bbox, size)
+        image = render(_VALUES, _META, bbox, size, tops=_TOPS)
         image.save(os.path.join(_OUT, f"{name}-refc-{_MINUTES:04d}.png"), optimize=True)
         return name, True, None
     except Exception as e:            # noqa: BLE001 - reported, never substituted
@@ -375,7 +384,25 @@ def colourise(dbz):
     return out
 
 
-def render(values, meta, bbox, size, paint=None, edge_cells=None):
+def grid_tops(values, meta):
+    """(lats, lons) of every core's top on the model's own grid (`peaks.band_tops`)."""
+    edges = [stop for stop, _ in RAMP if stop >= RESTORE_FLOOR_DBZ]
+    rows, cols = band_tops(np.nan_to_num(values, nan=-99.0), edges)
+    if rows.size == 0:
+        return np.array([]), np.array([])
+    lcc = CRS.from_proj4(
+        f"+proj=lcc +lat_1={meta['Latin1InDegrees']} +lat_2={meta['Latin2InDegrees']} "
+        f"+lat_0={meta['LaDInDegrees']} +lon_0={meta['LoVInDegrees']} "
+        f"+a={meta['radius']} +b={meta['radius']} +units=m +no_defs")
+    to_lcc = Transformer.from_crs("EPSG:4326", lcc, always_xy=True)
+    x0, y0 = to_lcc.transform(meta["longitudeOfFirstGridPointInDegrees"],
+                              meta["latitudeOfFirstGridPointInDegrees"])
+    to_ll = Transformer.from_crs(lcc, "EPSG:4326", always_xy=True)
+    lons, lats = to_ll.transform(x0 + cols * meta["DxInMetres"], y0 + rows * meta["DyInMetres"])
+    return np.asarray(lats), np.asarray(lons)
+
+
+def render(values, meta, bbox, size, paint=None, edge_cells=None, tops=None):
     """Cubic-spline sample from the model's Lambert grid into web mercator.
 
     `edge_cells`, for a painted layer only: its last channel (the alpha) is
@@ -383,6 +410,11 @@ def render(values, meta, bbox, size, paint=None, edge_cells=None):
     layer ends softly where the model's coverage ends instead of in a cut
     (B-262, the cloud's staircase across the Gulf). Reflectivity never takes
     it: rain at the edge keeps its colour (`edges.py`).
+
+    `tops`, for reflectivity: (lats, lons) of the step's cores from
+    `grid_tops`, restored in this picture at their own places; the picture
+    is shaped with a halo and cropped back (`peaks.halo_bbox`), so every
+    picture of a step carries the same values (item 19, B-265).
 
     This started as nearest-neighbour, on the theory that interpolating
     invented gradients the model did not produce. That was the wrong call.
@@ -414,6 +446,12 @@ def render(values, meta, bbox, size, paint=None, edge_cells=None):
     x0, y0 = to_lcc.transform(meta["longitudeOfFirstGridPointInDegrees"],
                               meta["latitudeOfFirstGridPointInDegrees"])
 
+    # Reflectivity is reprojected with a halo and cropped back after shaping,
+    # so an edge pixel is shaped like a middle one (item 19).
+    halo = SHAPE_HALO_PX if paint is None else 0
+    wanted, wanted_size = bbox, size
+    if halo:
+        bbox, size = halo_bbox(bbox, size, halo)
     west, south, east, north = bbox
     def merc_y(lat):
         return math.log(math.tan((90 + lat) * math.pi / 360)) / (math.pi / 180) * MERCATOR_R / 180
@@ -437,12 +475,18 @@ def render(values, meta, bbox, size, paint=None, edge_cells=None):
     sampled = np.where(inside, interpolated, -99.0)
     if paint is None:
         # Reflectivity only; cloud cover reuses the reprojection untouched.
+        places = pixels_of(tops[0], tops[1], bbox, size) if tops is not None else None
         sampled, before, after = shape(sampled, meta["DxInMetres"] / 111_000.0,
-                                       bbox, size, SMOOTH_CELLS)
+                                       bbox, size, SMOOTH_CELLS, tops=places,
+                                       painted=(RAMP[0][0], RAMP[0][0] + EDGE_FADE_DBZ))
         if before - after > 0.3:
             # Louder than a third of a ramp step: say so, with the frame size,
             # so a core understated by smoothing is in the run log, not hidden.
             print(f"smooth: peak {before:.1f} -> {after:.1f} dBZ on {size[0]}x{size[1]}", flush=True)
+        if halo:
+            sampled = sampled[halo:-halo, halo:-halo]
+            fx, fy = fx[halo:-halo, halo:-halo], fy[halo:-halo, halo:-halo]
+            bbox, size = wanted, wanted_size
     # `paint` so the cloud renderer can reuse this reprojection rather than
     # keeping a second copy of it. One implementation of the Lambert-to-mercator
     # sampling, which is the part that is easy to get subtly wrong.
@@ -506,8 +550,10 @@ def main():
         # after another, took eleven minutes of a run whose output ages while
         # it works. `fork` lets each worker inherit the decoded grid rather
         # than having it pickled per cell.
-        global _VALUES, _META, _OUT, _MINUTES
+        global _VALUES, _META, _OUT, _MINUTES, _TOPS
         _VALUES, _META, _OUT, _MINUTES = values, meta, args.out, minutes
+        # The step's cores, once, on the model grid, before the pool forks.
+        _TOPS = grid_tops(values, meta)
         with multiprocessing.Pool(processes=min(len(wanted_cells),
                                                 os.cpu_count() or 2)) as pool:
             for name, ok, err in pool.imap_unordered(_render_one, wanted_cells):

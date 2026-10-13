@@ -46,8 +46,10 @@ from scipy import ndimage
 from PIL import Image
 
 from render import (ALPHA, CONUS_BBOX, MERCATOR_R, PALETTE, QUANTISER, RAMP,
-                    RAMP_STEPS, colourise)
+                    RAMP_STEPS, colourise,
+                    EDGE_FADE_DBZ, RESTORE_FLOOR_DBZ, SHAPE_HALO_PX)
 from smoothing import shape
+from peaks import band_tops, pixels_of, halo_bbox
 from steps import select
 
 BUCKET = "https://noaa-mrms-pds.s3.amazonaws.com"
@@ -89,6 +91,7 @@ from cells import (CELL_ORIGINS, CELL_SIZE, CELL_SPAN,  # noqa: F401
 # forked child inherits them for free; passing the decoded grid as an argument
 # would pickle tens of megabytes per cell.
 _VALUES = _META = _SIZE = _OUT = _STAMP = None
+_TOPS = None          # (lats, lons) of the step's cores, found once on the mosaic (item 19)
 
 
 def _render_one(cell):
@@ -107,7 +110,11 @@ def _render_one(cell):
             px = MID_SIZE
         else:
             px = _SIZE
-        image = render(_VALUES, _META, bbox, px)
+        # The national picture samples the 1 km mosaic every 2.6 cells; a
+        # block maximum first, so no core between samples reads low (D-66's
+        # "never weaker than measured", C-15, C-16; item 19).
+        image = render(_VALUES, _META, bbox, px, tops=_TOPS,
+                       block=NATIONAL_BLOCK_CELLS if name == NATIONAL_ID else None)
         image.save(os.path.join(_OUT, f"{name}-{_STAMP}.png"), optimize=True)
         return name, True, None
     except Exception as e:            # noqa: BLE001 - reported, never substituted
@@ -224,8 +231,32 @@ def read_frame(key):
             pass
 
 
-def render(values, meta, bbox, size):
+NATIONAL_BLOCK_CELLS = 3
+
+
+def grid_tops(values, meta):
+    """(lats, lons) of every core's top on the mosaic's own grid (`peaks.band_tops`)."""
+    field = np.where(values < NO_ECHO, NO_ECHO, values)
+    edges = [stop for stop, _ in RAMP if stop >= RESTORE_FLOOR_DBZ]
+    rows, cols = band_tops(field, edges)
+    if rows.size == 0:
+        return np.array([]), np.array([])
+    lon0 = meta["longitudeOfFirstGridPointInDegrees"]
+    if lon0 > 180:
+        lon0 -= 360
+    lat0 = meta["latitudeOfFirstGridPointInDegrees"]
+    di, dj = meta["iDirectionIncrementInDegrees"], meta["jDirectionIncrementInDegrees"]
+    lats = lat0 + rows * dj if meta.get("jScansPositively") else lat0 - rows * dj
+    return lats, lon0 + cols * di
+
+
+def render(values, meta, bbox, size, tops=None, block=None):
     """Cubic-spline sample from the mosaic's lat/lon grid into web mercator.
+
+    `tops` (lats, lons): the step's cores from `grid_tops`, restored in this
+    picture at their own places; the picture is shaped with a halo and
+    cropped back (item 19). `block`: a block maximum of that many cells over
+    the mosaic before sampling, for the national picture.
 
     The same sampling the forecast frames use, and for the same reason: a
     storm edge is not a square, and nearest-neighbour draws one anyway. See
@@ -236,6 +267,8 @@ def render(values, meta, bbox, size):
     # No-coverage and no-echo are not weak returns. Left at -999 they ring
     # violently through a cubic filter and paint a dark halo round every cell.
     field = np.where(values < NO_ECHO, NO_ECHO, values)
+    if block:
+        field = ndimage.maximum_filter(field, size=block, mode="nearest")
 
     lon0 = meta["longitudeOfFirstGridPointInDegrees"]
     if lon0 > 180:
@@ -246,6 +279,8 @@ def render(values, meta, bbox, size):
     # MRMS scans north to south, so a row index counts *down* from lat0.
     south_up = bool(meta.get("jScansPositively"))
 
+    wanted, wanted_size = bbox, size
+    bbox, size = halo_bbox(bbox, size, SHAPE_HALO_PX)
     west, south, east, north = bbox
     def merc_y(lat):
         return math.log(math.tan((90 + lat) * math.pi / 360)) / (math.pi / 180) * MERCATOR_R / 180
@@ -266,9 +301,14 @@ def render(values, meta, bbox, size):
     interpolated = ndimage.map_coordinates(field, [fy, fx], order=3,
                                            mode="nearest", prefilter=True)
     sampled = np.where(inside, interpolated, -99.0)
-    sampled, before, after = shape(sampled, di, bbox, size, SMOOTH_CELLS)
+    places = pixels_of(tops[0], tops[1], bbox, size) if tops is not None else None
+    sampled, before, after = shape(sampled, di, bbox, size, SMOOTH_CELLS, tops=places,
+                                   painted=(RAMP[0][0], RAMP[0][0] + EDGE_FADE_DBZ))
     if before - after > 0.3:
         print(f"smooth: peak {before:.1f} -> {after:.1f} dBZ on {size[0]}x{size[1]}", flush=True)
+    h = SHAPE_HALO_PX
+    sampled = sampled[h:-h, h:-h]
+    bbox, size = wanted, wanted_size
     return Image.fromarray(colourise(sampled))
 
 
@@ -354,8 +394,9 @@ def main():
         missing = [(n, b) for n, b in wanted_cells
                    if not os.path.exists(os.path.join(args.out, f"{n}-{stamp}.png"))]
         if missing:
-            global _VALUES, _META, _SIZE, _OUT, _STAMP
+            global _VALUES, _META, _SIZE, _OUT, _STAMP, _TOPS
             _VALUES, _META, _SIZE, _OUT, _STAMP = values, meta, size, args.out, stamp
+            _TOPS = grid_tops(values, meta)     # the step's cores, once, before the pool forks
             with multiprocessing.Pool(processes=min(len(missing), os.cpu_count() or 2)) as pool:
                 for name, ok, err in pool.imap_unordered(_render_one, missing):
                     if ok:
