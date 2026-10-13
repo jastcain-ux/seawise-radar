@@ -44,6 +44,7 @@ from cells import (FORECAST_CELL_ORIGINS, FORECAST_CELL_SPAN,
 from smoothing import shape  # noqa: E402
 from edges import edge_weight  # noqa: E402
 from peaks import band_tops, pixels_of, halo_bbox  # noqa: E402
+from naming import publication_stamp  # noqa: E402
 
 NOMADS = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hrrr/prod"
 MERCATOR_R = 20037508.342789244
@@ -131,6 +132,7 @@ PALETTE = "twc-2-bands-r4"   # r4: every core's top kept, the light showers kept
 
 # Set before the pool forks, read inside the workers. See `observed.py`.
 _VALUES = _META = _OUT = _MINUTES = None
+_PUB = None           # this publication's stamp, the last token of every name it writes (item 21)
 _TOPS = None          # (lats, lons) of the step's cores, found once on the model grid
 
 # The restore floor: where the ramp leaves green (D-66, amended 2026-09-02).
@@ -146,7 +148,7 @@ def _render_one(cell):
     name, bbox, size = cell
     try:
         image = render(_VALUES, _META, bbox, size, tops=_TOPS)
-        image.save(os.path.join(_OUT, f"{name}-refc-{_MINUTES:04d}.png"), optimize=True)
+        image.save(os.path.join(_OUT, f"{name}-refc-{_MINUTES:04d}-{_PUB}.png"), optimize=True)
         return name, True, None
     except Exception as e:            # noqa: BLE001 - reported, never substituted
         return name, False, str(e)
@@ -515,6 +517,13 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
+    # Every picture this publication writes ends in its stamp, so a new run
+    # never overwrites a name a phone's manifest still points at (B-258,
+    # item 21); prune.py keeps the previous set an hour.
+    published_at = datetime.datetime.now(datetime.timezone.utc)
+    global _PUB
+    _PUB = publication_stamp(published_at)
+
     day, run = chosen_run()
     run_at = datetime.datetime.strptime(f"{day}{run:02d}", "%Y%m%d%H").replace(
         tzinfo=datetime.timezone.utc)
@@ -562,15 +571,15 @@ def main():
                         "leadMinutes": minutes,
                         "cell": name,
                         "validTime": when.isoformat().replace("+00:00", "Z") if when else None,
-                        "image": f"{name}-refc-{minutes:04d}.png",
+                        "image": f"{name}-refc-{minutes:04d}-{_PUB}.png",
                     })
                     written += 1
                 else:
                     print(f"  +{minutes:3d} min {name}: SKIPPED: {err}", file=sys.stderr)
 
-        kb = sum(os.path.getsize(os.path.join(args.out, f"{n}-refc-{minutes:04d}.png"))
+        kb = sum(os.path.getsize(os.path.join(args.out, f"{n}-refc-{minutes:04d}-{_PUB}.png"))
                  for n, _, _ in wanted_cells
-                 if os.path.exists(os.path.join(args.out, f"{n}-refc-{minutes:04d}.png"))) / 1024
+                 if os.path.exists(os.path.join(args.out, f"{n}-refc-{minutes:04d}-{_PUB}.png"))) / 1024
         print(f"  +{minutes:3d} min  {nbytes/1e6:.2f} MB in  ->  {written} cells, {kb:5.0f} KB")
 
     if not frames:
@@ -581,8 +590,7 @@ def main():
         "field": "composite reflectivity",
         "source": "NOAA NCEP, public domain",
         "runTime": run_at.isoformat().replace("+00:00", "Z"),
-        "generatedAt": datetime.datetime.now(datetime.timezone.utc)
-            .isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "generatedAt": published_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "size": {"width": FORECAST_CELL_SIZE[0], "height": FORECAST_CELL_SIZE[1]},
         "dbzFloor": RAMP[0][0],
         # Recorded so the workflow can tell when the picture's own rule changed.

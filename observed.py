@@ -50,6 +50,7 @@ from render import (ALPHA, CONUS_BBOX, MERCATOR_R, PALETTE, QUANTISER, RAMP,
                     EDGE_FADE_DBZ, RESTORE_FLOOR_DBZ, SHAPE_HALO_PX)
 from smoothing import shape
 from peaks import band_tops, pixels_of, halo_bbox
+from naming import style_revision
 from steps import select
 
 BUCKET = "https://noaa-mrms-pds.s3.amazonaws.com"
@@ -91,6 +92,7 @@ from cells import (CELL_ORIGINS, CELL_SIZE, CELL_SPAN,  # noqa: F401
 # forked child inherits them for free; passing the decoded grid as an argument
 # would pickle tens of megabytes per cell.
 _VALUES = _META = _SIZE = _OUT = _STAMP = None
+_REV = None           # the drawing rule's revision, the last token of every measured name (item 21)
 _TOPS = None          # (lats, lons) of the step's cores, found once on the mosaic (item 19)
 
 
@@ -115,7 +117,7 @@ def _render_one(cell):
         # "never weaker than measured", C-15, C-16; item 19).
         image = render(_VALUES, _META, bbox, px, tops=_TOPS,
                        block=NATIONAL_BLOCK_CELLS if name == NATIONAL_ID else None)
-        image.save(os.path.join(_OUT, f"{name}-{_STAMP}.png"), optimize=True)
+        image.save(os.path.join(_OUT, f"{name}-{_STAMP}-{_REV}.png"), optimize=True)
         return name, True, None
     except Exception as e:            # noqa: BLE001 - reported, never substituted
         return name, False, str(e)
@@ -341,23 +343,21 @@ def main():
             published = json.load(f)
     except (OSError, ValueError):
         published = {}
-    restyle = any(published.get(k) != v for k, v in style.items())
-    if restyle:
-        print("drawing rule changed; redrawing every measured frame")
+    # The rule's revision is in every name, so a restyle renders new names
+    # beside the old ones (item 21, B-272) instead of unlinking and redrawing
+    # the same names with new bytes; prune.py removes the old names once
+    # their stamps age out.
+    rev = style_revision(style)
+    if any(published.get(k) != v for k, v in style.items()):
+        print(f"drawing rule changed; drawing every measured frame under revision {rev}")
 
     frames, downloaded, reused, rendered = [], 0, 0, 0
     for when, key in steps:
         stamp = when.strftime("%Y%m%dT%H%M") + "Z"
-        if restyle:
-            for name, _ in wanted_cells:
-                try:
-                    os.unlink(os.path.join(args.out, f"{name}-{stamp}.png"))
-                except OSError:
-                    pass
         # Which cells still need this step. One GRIB read serves all of them,
         # so the download only happens if at least one is missing.
         todo = [(name, bbox) for name, bbox in wanted_cells
-                if not os.path.exists(os.path.join(args.out, f"{name}-{stamp}.png"))]
+                if not os.path.exists(os.path.join(args.out, f"{name}-{stamp}-{rev}.png"))]
         values = meta = None
         if todo:
             try:
@@ -385,32 +385,32 @@ def main():
         # grid rather than having it pickled across — the array is tens of
         # megabytes and sending it per cell would cost more than the drawing.
         for name, bbox in wanted_cells:
-            image_name = f"{name}-{stamp}.png"
+            image_name = f"{name}-{stamp}-{rev}.png"
             if os.path.exists(os.path.join(args.out, image_name)):
                 frames.append({"observedTime": when.isoformat().replace("+00:00", "Z"),
                                "cell": name, "image": image_name})
                 reused += 1
 
         missing = [(n, b) for n, b in wanted_cells
-                   if not os.path.exists(os.path.join(args.out, f"{n}-{stamp}.png"))]
+                   if not os.path.exists(os.path.join(args.out, f"{n}-{stamp}-{rev}.png"))]
         if missing:
-            global _VALUES, _META, _SIZE, _OUT, _STAMP, _TOPS
-            _VALUES, _META, _SIZE, _OUT, _STAMP = values, meta, size, args.out, stamp
+            global _VALUES, _META, _SIZE, _OUT, _STAMP, _TOPS, _REV
+            _VALUES, _META, _SIZE, _OUT, _STAMP, _REV = values, meta, size, args.out, stamp, rev
             _TOPS = grid_tops(values, meta)     # the step's cores, once, before the pool forks
             with multiprocessing.Pool(processes=min(len(missing), os.cpu_count() or 2)) as pool:
                 for name, ok, err in pool.imap_unordered(_render_one, missing):
                     if ok:
                         frames.append({"observedTime": when.isoformat().replace("+00:00", "Z"),
                                        "cell": name,
-                                       "image": f"{name}-{stamp}.png"})
+                                       "image": f"{name}-{stamp}-{rev}.png"})
                         rendered += 1
                     else:
                         print(f"  {when:%H:%M}Z {name}: SKIPPED: {err}", file=sys.stderr)
 
         if todo:
-            kb = sum(os.path.getsize(os.path.join(args.out, f"{n}-{stamp}.png"))
+            kb = sum(os.path.getsize(os.path.join(args.out, f"{n}-{stamp}-{rev}.png"))
                      for n, _ in wanted_cells
-                     if os.path.exists(os.path.join(args.out, f"{n}-{stamp}.png"))) / 1024
+                     if os.path.exists(os.path.join(args.out, f"{n}-{stamp}-{rev}.png"))) / 1024
             print(f"  {when:%H:%M}Z  {len(todo)} cells  ->  {kb:6.0f} KB total")
 
     if not frames:

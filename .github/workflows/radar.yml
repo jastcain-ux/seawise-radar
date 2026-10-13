@@ -97,7 +97,7 @@ jobs:
       # Measured radar, every run. Cheap: one or two new frames per run,
       # about 1.5 MB in and 400 KB out each.
       - name: Unit tests for the renderer maths
-        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate
+        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate test_prune
 
       - name: Render measured frames
         run: python observed.py --out public/observed
@@ -126,10 +126,12 @@ jobs:
         continue-on-error: true
         run: python lightning.py --minutes 30 --out public/lightning
 
-      - name: Prune measured and projected frames the timeline can no longer reach
+      # Each keeps the set a phone's manifest may still name (radar build 7, item 21; B-258): the measured
+      # stamps are the frames' own times, up to an hour past the two-hour window; the nowcast's its run's.
+      - name: Prune measured and projected frames the timeline can no longer reach, an hour after
         run: |
-          python prune.py --dir public/observed
-          python prune.py --dir public/nowcast
+          python prune.py --dir public/observed --keep-newer-than 180
+          python prune.py --dir public/nowcast --keep-newer-than 70
 
       # Carried forward twice a run: here, so a failed forecast job still
       # leaves the next run a fresh measured set to restore; and again after
@@ -233,8 +235,8 @@ jobs:
         continue-on-error: true
         run: python cloud.py --out public/cloud
 
-      - name: Prune forecast frames the timeline can no longer reach
-        run: python prune.py --dir public
+      - name: Prune forecast frames the timeline can no longer reach, an hour after their publication
+        run: python prune.py --dir public --keep-newer-than 60
 
       - name: Carry the frames to the next run
         uses: actions/cache/save@v4
