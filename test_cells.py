@@ -205,6 +205,20 @@ class RegionalCells(unittest.TestCase):
         self.assertLessEqual(min(s for _, (_, s, _, _) in cells), ds)
         self.assertGreaterEqual(max(n for _, (_, _, _, n) in cells), dn)
 
+    def test_the_tier_ids_never_collide_with_the_other_tiers_or_the_national(self):
+        # Every writer keeps the tier out of the `cells` and `frames` lists the installed builds read by
+        # `is_regional` on the id alone, so no close, wide or national id may ever read as a tier one, and every
+        # tier id must (build 7's renderer reader: nothing pinned the split that keeps the installed builds safe).
+        tier = [name for name, _ in layout.regional_cells()]
+        self.assertEqual(len(tier), 12)
+        self.assertTrue(all(layout.is_regional(name) for name in tier))
+        others = ([name for name, _w, _s in layout.CELL_ORIGINS]
+                  + [name for name, _w, _s in layout.FORECAST_CELL_ORIGINS]
+                  + [f"wide-{name}" for name, _w, _s in layout.MID_ORIGINS]
+                  + [layout.NATIONAL_ID])
+        self.assertFalse([name for name in others if layout.is_regional(name)])
+        self.assertFalse(set(tier) & set(others))
+
     def test_a_spot_outside_conus_has_no_regional_picture(self):
         cells = layout.regional_cells()
         self.assertFalse(covering(cells, 21.30, -157.85), "Honolulu")
