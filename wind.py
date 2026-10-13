@@ -28,6 +28,7 @@ from cells import (CELL_ORIGINS, CELL_SPAN, MID_ORIGINS,        # noqa: E402
                    MID_SPAN, MID_WIND_STEP_DEG, NATIONAL_BBOX,
                    NATIONAL_ID, NATIONAL_WIND_STEP_DEG)
 import render                                       # noqa: E402
+from edges import inside_mask                       # noqa: E402
 
 # Hourly, not every fifteen minutes. Wind at the radar's cadence would be
 # 4.6 MB a step and 166 MB a run against the radar's own 17 MB, for a layer
@@ -131,7 +132,11 @@ def sample(values, meta, west, south, east, north, step=None):
     col = (gx - x0) / meta["DxInMetres"]
     row = (gy - y0) / meta["DyInMetres"]
     out = map_coordinates(values, [row, col], order=1, mode="nearest")
-    return out.reshape(ny, nx), nx, ny
+    # `mode="nearest"` carries the edge row on past the model's coverage, so
+    # the caller is told which samples were inside the grid (B-271): the mask
+    # goes into the picture's blue channel.
+    inside = inside_mask(col, row, meta["Nx"], meta["Ny"]).reshape(ny, nx)
+    return out.reshape(ny, nx), nx, ny, inside
 
 
 def main():
@@ -170,8 +175,8 @@ def main():
                       NATIONAL_BBOX[2], NATIONAL_BBOX[3], NATIONAL_WIND_STEP_DEG))
 
         for name, west, south, east, north, step in boxes:
-            gu, nx, ny = sample(u, meta, west, south, east, north, step)
-            gv, _, _ = sample(v, meta, west, south, east, north, step)
+            gu, nx, ny, inside = sample(u, meta, west, south, east, north, step)
+            gv, _, _, _ = sample(v, meta, west, south, east, north, step)
 
             # Metres per second out of HRRR; knots is what this app stores and
             # what every threshold in the rating engine is written in.
@@ -182,7 +187,10 @@ def main():
                 return np.round((a + SPEED_LIMIT_KT) / (2 * SPEED_LIMIT_KT) * 255
                                 ).astype(np.uint8)
 
-            rgb = np.dstack([encode(gu), encode(gv), np.zeros_like(gu, dtype=np.uint8)])
+            # B is the mask: 255 inside the model, 0 past its coverage, where the
+            # sample is the edge row smeared on (B-271). Installed builds read R
+            # and G only; the new build draws no field where B is 0.
+            rgb = np.dstack([encode(gu), encode(gv), np.where(inside, 255, 0).astype(np.uint8)])
             image = f"{name}-wind-{minutes:04d}.png"
             path = os.path.join(args.out, image)
             Image.fromarray(rgb, mode="RGB").save(path, optimize=True)
@@ -203,6 +211,9 @@ def main():
         # future change to the range cannot silently rescale every arrow.
         "speedLimitKt": SPEED_LIMIT_KT,
         "stepDegrees": STEP_DEG,
+        # B is 255 where the sample lies inside the model's grid and 0 past its
+        # edge, where R and G carry the edge row on (B-271).
+        "insideMaskChannel": "B",
         "frames": frames,
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:

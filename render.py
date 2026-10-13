@@ -42,6 +42,7 @@ from cells import (FORECAST_CELL_ORIGINS, FORECAST_CELL_SPAN,
                    FORECAST_CELL_SIZE, NATIONAL_BBOX, NATIONAL_ID,
                    NATIONAL_SIZE)
 from smoothing import shape  # noqa: E402
+from edges import edge_weight  # noqa: E402
 
 NOMADS = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hrrr/prod"
 MERCATOR_R = 20037508.342789244
@@ -374,8 +375,14 @@ def colourise(dbz):
     return out
 
 
-def render(values, meta, bbox, size, paint=None):
+def render(values, meta, bbox, size, paint=None, edge_cells=None):
     """Cubic-spline sample from the model's Lambert grid into web mercator.
+
+    `edge_cells`, for a painted layer only: its last channel (the alpha) is
+    faded to nothing over that many grid cells inside the model's edge, so the
+    layer ends softly where the model's coverage ends instead of in a cut
+    (B-262, the cloud's staircase across the Gulf). Reflectivity never takes
+    it: rain at the edge keeps its colour (`edges.py`).
 
     This started as nearest-neighbour, on the theory that interpolating
     invented gradients the model did not produce. That was the wrong call.
@@ -439,7 +446,12 @@ def render(values, meta, bbox, size, paint=None):
     # `paint` so the cloud renderer can reuse this reprojection rather than
     # keeping a second copy of it. One implementation of the Lambert-to-mercator
     # sampling, which is the part that is easy to get subtly wrong.
-    return Image.fromarray((paint or colourise)(sampled))
+    painted = (paint or colourise)(sampled)
+    if paint is not None and edge_cells:
+        weight = edge_weight(fx, fy, meta["Nx"], meta["Ny"], edge_cells)
+        painted = painted.copy()
+        painted[..., -1] = np.round(painted[..., -1] * weight).astype(np.uint8)
+    return Image.fromarray(painted)
 
 
 def valid_time(meta):

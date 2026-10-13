@@ -2,6 +2,7 @@
 import unittest
 import numpy as np
 from smoothing import smooth, shape, restore_peaks, sigma_px, OUTSIDE
+from edges import edge_weight, inside_mask
 from scipy import ndimage
 
 BBOX = (-100.0, 25.0, -90.0, 32.0)
@@ -98,6 +99,33 @@ class SmoothingTests(unittest.TestCase):
         out, _, _ = shape(f, HRRR, BBOX, SIZE, 0.7)
         np.testing.assert_array_equal(out[:, 50:], OUTSIDE)
         self.assertGreaterEqual(out[:, :50].min(), 40.0 - 1e-6)
+
+
+class EdgeTests(unittest.TestCase):
+    """The model's edge (radar build 7, item 14; B-262, B-271)."""
+
+    def test_the_weight_is_one_inside_and_zero_outside(self):
+        fx = np.array([-1.0, 0.0, 5.0, 98.0, 99.0, 120.0])
+        fy = np.full(6, 50.0)
+        np.testing.assert_array_equal(edge_weight(fx, fy, 100, 100, None), [0, 1, 1, 1, 0, 0])
+
+    def test_the_weight_fades_over_the_last_cells_on_every_side(self):
+        # Three cells from the west edge: 0, 1/3, 2/3, 1; the same from the south.
+        w = edge_weight(np.array([0.0, 1.0, 2.0, 3.0, 50.0]), np.full(5, 50.0), 100, 100, 3)
+        np.testing.assert_allclose(w, [0, 1 / 3, 2 / 3, 1, 1])
+        w = edge_weight(np.full(4, 50.0), np.array([98.0, 97.0, 96.0, 95.0]), 100, 100, 3)
+        np.testing.assert_allclose(w, [1 / 3, 2 / 3, 1, 1])
+
+    def test_outside_the_grid_weighs_nothing_whatever_the_fade(self):
+        self.assertEqual(edge_weight(np.array([-0.5]), np.array([10.0]), 100, 100, 3)[0], 0.0)
+        self.assertEqual(edge_weight(np.array([10.0]), np.array([99.5]), 100, 100, 3)[0], 0.0)
+
+    def test_the_inside_mask_marks_the_edge_row_smear(self):
+        col = np.array([-3.0, 0.0, 10.0, 99.0, 99.5])
+        row = np.full(5, 10.0)
+        np.testing.assert_array_equal(inside_mask(col, row, 100, 100), [False, True, True, True, False])
+        np.testing.assert_array_equal(inside_mask(np.full(3, 10.0), np.array([-1.0, 50.0, 100.0]), 100, 100),
+                                      [False, True, False])
 
 
 if __name__ == "__main__":

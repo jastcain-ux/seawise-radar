@@ -38,6 +38,12 @@ MAX_ALPHA = 0.55
 # translucent wash and compress like a poster.
 ALPHA_STEPS = 16
 
+# The model's coverage ends in a fade over its last grid cells, not a cut: on
+# the national picture's 5 km pixels the cut was a staircase across the Gulf
+# from 24.4N at 97.5W to 23.2N at 82W (B-262; radar build 7, item 14). Three
+# cells is about 9 km of open water.
+EDGE_FADE_CELLS = 3
+
 
 def colourise(cover):
     """Percent cloud cover to a soft white wash, as luminance plus alpha.
@@ -51,7 +57,9 @@ def colourise(cover):
     # Below a tenth is a clear sky with a wisp in it; drawing it only makes the
     # map look dirty.
     alpha = np.where(pct < 10, 0.0, (pct / 100.0) * MAX_ALPHA)
-    stepped = np.round(alpha * ALPHA_STEPS) / ALPHA_STEPS
+    # Rounded to the step, then held under the cap: round(0.55 x 16) / 16 is
+    # 0.5625, so the top step sat over MAX_ALPHA (and would at 32 steps too).
+    stepped = np.minimum(np.round(alpha * ALPHA_STEPS) / ALPHA_STEPS, MAX_ALPHA)
     h, w = pct.shape
     out = np.zeros((h, w, 2), dtype=np.uint8)
     out[..., 0] = 246
@@ -94,7 +102,8 @@ def main():
                     if name == NATIONAL_ID
                     else (render.FORECAST_CELL_SIZE[0] // 2,
                           render.FORECAST_CELL_SIZE[1] // 2))
-            image = render.render(values, meta, bbox, size, paint=colourise)
+            image = render.render(values, meta, bbox, size, paint=colourise,
+                                  edge_cells=EDGE_FADE_CELLS)
             filename = f"{name}-cloud-{minutes:04d}.png"
             path = os.path.join(args.out, filename)
             image.save(path, optimize=True)
@@ -111,6 +120,8 @@ def main():
         "generatedAt": datetime.datetime.now(datetime.timezone.utc)
             .strftime("%Y-%m-%dT%H:%M:%SZ"),
         "maxAlpha": MAX_ALPHA,
+        "alphaSteps": ALPHA_STEPS,
+        "edgeFadeCells": EDGE_FADE_CELLS,
         "frames": frames,
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
