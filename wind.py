@@ -26,7 +26,9 @@ from scipy.ndimage import map_coordinates
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cells import (CELL_ORIGINS, CELL_SPAN, MID_ORIGINS,        # noqa: E402
                    MID_SPAN, MID_WIND_STEP_DEG, NATIONAL_BBOX,
-                   NATIONAL_ID, NATIONAL_WIND_STEP_DEG)
+                   NATIONAL_ID, NATIONAL_WIND_STEP_DEG,
+                   REGIONAL_KEY, REGIONAL_SPAN, REGIONAL_ORIGINS, REGIONAL_WIND_STEP_DEG,
+                   is_regional)
 import render                                       # noqa: E402
 from edges import inside_mask                       # noqa: E402
 
@@ -146,7 +148,7 @@ def main():
 
     day, run = render.chosen_run()
     os.makedirs(args.out, exist_ok=True)
-    frames, total_in, total_out = [], 0, 0
+    frames, regional_frames, total_in, total_out = [], [], 0, 0
 
     for minutes in LEAD_MINUTES:
         try:
@@ -171,6 +173,9 @@ def main():
         boxes += [(f"wide-{n}", w, s2, w + MID_SPAN[0], s2 + MID_SPAN[1],
                    MID_WIND_STEP_DEG)
                   for n, w, s2 in MID_ORIGINS]
+        # The regional tier (radar build 7, item 11), at the wide tier's step.
+        boxes += [(n, w, s2, w + REGIONAL_SPAN[0], s2 + REGIONAL_SPAN[1], REGIONAL_WIND_STEP_DEG)
+                  for n, w, s2 in REGIONAL_ORIGINS]
         boxes.append((NATIONAL_ID, NATIONAL_BBOX[0], NATIONAL_BBOX[1],
                       NATIONAL_BBOX[2], NATIONAL_BBOX[3], NATIONAL_WIND_STEP_DEG))
 
@@ -196,7 +201,8 @@ def main():
             Image.fromarray(rgb, mode="RGB").save(path, optimize=True)
             total_out += os.path.getsize(path)
 
-            frames.append({"cell": name, "leadMinutes": minutes, "image": image,
+            (regional_frames if is_regional(name) else frames).append(
+                          {"cell": name, "leadMinutes": minutes, "image": image,
                            "validTime": _stamp(render.valid_time(meta)),
                            "nx": nx, "ny": ny,
                            "west": west, "south": south, "east": east, "north": north})
@@ -215,6 +221,9 @@ def main():
         # edge, where R and G carry the edge row on (B-271).
         "insideMaskChannel": "B",
         "frames": frames,
+        # The regional tier (item 11), under its own key: the installed builds choose among every frame's
+        # box inside `frames` and would draw these at 12 to 20 degrees.
+        REGIONAL_KEY: {"frames": regional_frames},
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, separators=(",", ":"))

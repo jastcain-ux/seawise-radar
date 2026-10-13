@@ -37,7 +37,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import observed                                            # noqa: E402
 import render as forecast                                   # noqa: E402
 from cells import (CELL_ORIGINS, CELL_SIZE, CELL_SPAN, MID_ORIGINS,  # noqa: E402
-                   MID_SPAN, MID_SIZE, NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE)
+                   MID_SPAN, MID_SIZE, NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE,
+                   REGIONAL_KEY, REGIONAL_PX_PER_DEGREE, REGIONAL_SIZE,
+                   is_regional, regional_cells)
 
 LEAD_MINUTES = [15, 30, 45, 60, 75, 90, 105, 120]
 # Pooling before correlation: the mosaic is 0.01 degrees and storm motion is a
@@ -200,6 +202,8 @@ def _render_one(cell):
     try:
         if name == NATIONAL_ID:
             px = NOWCAST_NATIONAL_SIZE
+        elif is_regional(name):
+            px = REGIONAL_SIZE
         elif name.startswith("wide-"):
             px = NOWCAST_MID_SIZE
         else:
@@ -219,6 +223,7 @@ def tiers(minutes):
     if minutes in CLOSE_LEADS:
         out += [(n, (w, s, w + CELL_SPAN[0], s + CELL_SPAN[1])) for n, w, s in CELL_ORIGINS]
     out += [(f"wide-{n}", (w, s, w + MID_SPAN[0], s + MID_SPAN[1])) for n, w, s in MID_ORIGINS]
+    out += regional_cells()                      # the regional tier, every lead (item 11)
     out.append((NATIONAL_ID, NATIONAL_BBOX))
     return out
 
@@ -259,7 +264,7 @@ def main():
     print(f"tracked {stamp}: frames {apart:.0f} min apart, "
           f"median motion {np.median(np.hypot(vy, vx)) * 60 * 1.1:.0f} km/h")
 
-    frames = []
+    frames, regional_frames = [], []
     seen_cells = {}
     global _FIELD, _META, _OUT, _STAMP, _TOPS
     _META, _OUT = meta, args.out
@@ -275,9 +280,10 @@ def main():
             results = pool.map(_render_one, wanted)
         for name, ok, err in results:
             if ok:
-                frames.append({"cell": name, "leadMinutes": minutes,
-                               "validTime": when.isoformat().replace("+00:00", "Z"),
-                               "image": f"{name}-{_STAMP}.png"})
+                (regional_frames if is_regional(name) else frames).append(
+                    {"cell": name, "leadMinutes": minutes,
+                     "validTime": when.isoformat().replace("+00:00", "Z"),
+                     "image": f"{name}-{_STAMP}.png"})
             else:
                 print(f"  +{minutes:3d} {name}: SKIPPED: {err}", file=sys.stderr)
         print(f"  +{minutes:3d} min -> {sum(1 for _, ok, _ in results if ok)} frames")
@@ -300,8 +306,16 @@ def main():
         "smoothing": observed.SMOOTH_CELLS,
         "alpha": forecast.ALPHA,
         "cells": [{"id": n, "bbox": {"west": b[0], "south": b[1], "east": b[2], "north": b[3]}}
-                  for n, b in seen_cells.items()],
+                  for n, b in seen_cells.items() if not is_regional(n)],
         "frames": frames,
+        # The regional tier (radar build 7, item 11), under a key the installed builds ignore.
+        REGIONAL_KEY: {
+            "pxPerDegree": REGIONAL_PX_PER_DEGREE,
+            "size": {"width": REGIONAL_SIZE[0], "height": REGIONAL_SIZE[1]},
+            "cells": [{"id": n, "bbox": {"west": b[0], "south": b[1], "east": b[2], "north": b[3]}}
+                      for n, b in seen_cells.items() if is_regional(n)],
+            "frames": regional_frames,
+        },
     }
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=1)

@@ -85,7 +85,9 @@ HISTORY_MINUTES = 120
 # national frame it replaces, which could not serve this zoom at all.
 from cells import (CELL_ORIGINS, CELL_SIZE, CELL_SPAN,  # noqa: F401
                    MID_ORIGINS, MID_SIZE, MID_SPAN,
-                   NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE)
+                   NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE,
+                   REGIONAL_KEY, REGIONAL_PX_PER_DEGREE, REGIONAL_SIZE,
+                   is_regional, regional_cells)
 
 
 # Set before the pool forks, read inside the workers. Module-level because a
@@ -108,6 +110,8 @@ def _render_one(cell):
         # model's own resolution.
         if name == NATIONAL_ID:
             px = NATIONAL_SIZE
+        elif is_regional(name):
+            px = REGIONAL_SIZE          # the regional tier, 1:1 with the mosaic (item 11)
         elif name.startswith("wide-"):
             px = MID_SIZE
         else:
@@ -330,7 +334,9 @@ def main():
     if not steps:
         raise SystemExit("no MRMS frames listed; leaving the previous manifest in place")
 
-    wanted_cells = [c for c in cells() if not args.only or c[0] == args.only]
+    # The regional tier renders beside the three tiers; its frames go under
+    # the manifest's `regional` key, which the installed builds ignore.
+    wanted_cells = [c for c in cells() + regional_cells() if not args.only or c[0] == args.only]
 
     # Redraw everything when the drawing rule changed, the way the forecast's
     # workflow gate does. Without this the loop kept twelve old-style frames
@@ -351,7 +357,11 @@ def main():
     if any(published.get(k) != v for k, v in style.items()):
         print(f"drawing rule changed; drawing every measured frame under revision {rev}")
 
-    frames, downloaded, reused, rendered = [], 0, 0, 0
+    frames, regional_frames, downloaded, reused, rendered = [], [], 0, 0, 0
+
+    def file_frame(name, when, image_name):
+        entry = {"observedTime": when.isoformat().replace("+00:00", "Z"), "cell": name, "image": image_name}
+        (regional_frames if is_regional(name) else frames).append(entry)
     for when, key in steps:
         stamp = when.strftime("%Y%m%dT%H%M") + "Z"
         # Which cells still need this step. One GRIB read serves all of them,
@@ -387,8 +397,7 @@ def main():
         for name, bbox in wanted_cells:
             image_name = f"{name}-{stamp}-{rev}.png"
             if os.path.exists(os.path.join(args.out, image_name)):
-                frames.append({"observedTime": when.isoformat().replace("+00:00", "Z"),
-                               "cell": name, "image": image_name})
+                file_frame(name, when, image_name)
                 reused += 1
 
         missing = [(n, b) for n, b in wanted_cells
@@ -400,9 +409,7 @@ def main():
             with multiprocessing.Pool(processes=min(len(missing), os.cpu_count() or 2)) as pool:
                 for name, ok, err in pool.imap_unordered(_render_one, missing):
                     if ok:
-                        frames.append({"observedTime": when.isoformat().replace("+00:00", "Z"),
-                                       "cell": name,
-                                       "image": f"{name}-{stamp}-{rev}.png"})
+                        file_frame(name, when, f"{name}-{stamp}-{rev}.png")
                         rendered += 1
                     else:
                         print(f"  {when:%H:%M}Z {name}: SKIPPED: {err}", file=sys.stderr)
@@ -432,7 +439,16 @@ def main():
         "size": {"width": size[0], "height": size[1]},
         "cells": [{"id": name,
                    "bbox": {"west": b[0], "south": b[1], "east": b[2], "north": b[3]}}
-                  for name, b in wanted_cells],
+                  for name, b in wanted_cells if not is_regional(name)],
+        # The regional tier (radar build 7, item 11): a key the installed builds
+        # ignore, so 1.0 (12) and the testers' builds never draw these pictures.
+        REGIONAL_KEY: {
+            "pxPerDegree": REGIONAL_PX_PER_DEGREE,
+            "size": {"width": REGIONAL_SIZE[0], "height": REGIONAL_SIZE[1]},
+            "cells": [{"id": name, "bbox": {"west": b[0], "south": b[1], "east": b[2], "north": b[3]}}
+                      for name, b in wanted_cells if is_regional(name)],
+            "frames": regional_frames,
+        },
         "frames": frames,
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:

@@ -169,5 +169,56 @@ class MeasuredCells(unittest.TestCase):
         self.assertGreater(measured, forecast * 2)
 
 
+class RegionalCells(unittest.TestCase):
+    """The regional tier (radar build 7, item 11): one picture holds any view up to 12 degrees wide at every spot."""
+
+    DOMAIN = (-134.0, 21.0, -61.0, 52.6)       # HRRR CONUS, from the GRIB (the start reader, 2026-10-12)
+
+    def test_twelve_pictures_on_a_twelve_degree_grid(self):
+        cells = layout.regional_cells()
+        self.assertEqual(len(cells), 12)
+        for name, (w, s, e, n) in cells:
+            self.assertTrue(name.startswith(layout.REGIONAL_PREFIX), name)
+            self.assertFalse(name.startswith("wide-"))
+            self.assertEqual((e - w, n - s), layout.REGIONAL_SPAN)
+        wests = sorted({w for _, (w, _, _, _) in cells}); souths = sorted({s for _, (_, s, _, _) in cells})
+        self.assertEqual([b - a for a, b in zip(wests, wests[1:])], [12.0] * 5)
+        self.assertEqual(souths, [21.0, 33.0])
+
+    def test_every_spot_sits_six_degrees_inside_some_picture_or_at_the_domains_edge(self):
+        """An 11-degree view anywhere the app serves is drawn from one picture: the view's half-width plus
+        the chooser's margin is under 6 degrees. Near the model's own edge the picture reaches the edge, no further."""
+        cells = layout.regional_cells()
+        dw, ds, de, dn = self.DOMAIN
+        for name, lat, lon in SPOTS + LAKES + OFFSHORE:
+            best = max(min(lon - w, e - lon, lat - s, n - lat)
+                       for _, (w, s, e, n) in cells if w <= lon <= e and s <= lat <= n)
+            to_edge = min(lon - dw, de - lon, lat - ds, dn - lat)
+            self.assertGreaterEqual(best, min(6.0, to_edge) - 1e-9,
+                                    f"{name} sits only {best:.1f} degrees inside its best regional picture")
+
+    def test_the_grid_covers_the_model_domain(self):
+        cells = layout.regional_cells()
+        dw, ds, de, dn = self.DOMAIN
+        self.assertLessEqual(min(w for _, (w, _, _, _) in cells), dw)
+        self.assertGreaterEqual(max(e for _, (_, _, e, _) in cells), de)
+        self.assertLessEqual(min(s for _, (_, s, _, _) in cells), ds)
+        self.assertGreaterEqual(max(n for _, (_, _, _, n) in cells), dn)
+
+    def test_a_spot_outside_conus_has_no_regional_picture(self):
+        cells = layout.regional_cells()
+        self.assertFalse(covering(cells, 21.30, -157.85), "Honolulu")
+        self.assertFalse(covering(cells, 61.20, -149.90), "Anchorage")
+        self.assertFalse(covering(cells, 18.47, -66.10), "San Juan")
+
+    def test_the_densities_sit_between_the_wide_tier_and_the_national(self):
+        national = layout.NATIONAL_SIZE[0] / (layout.NATIONAL_BBOX[2] - layout.NATIONAL_BBOX[0])
+        wide = layout.MID_SIZE[0] / layout.MID_SPAN[0]
+        for px in (layout.REGIONAL_PX_PER_DEGREE, layout.FORECAST_REGIONAL_PX_PER_DEGREE):
+            self.assertGreater(px, national); self.assertLess(px, wide)
+        self.assertEqual(layout.REGIONAL_SIZE, (2400, 2400))
+        self.assertEqual(layout.FORECAST_REGIONAL_SIZE, (1920, 1920))
+
+
 if __name__ == "__main__":
     unittest.main()

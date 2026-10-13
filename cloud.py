@@ -20,7 +20,8 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cells import NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE  # noqa: E402
+from cells import (NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE,  # noqa: E402
+                   CLOUD_REGIONAL_SIZE, REGIONAL_KEY, is_regional, regional_cells)
 import render                                        # noqa: E402
 import wind                                          # noqa: E402
 
@@ -74,7 +75,7 @@ def main():
 
     day, run = render.chosen_run()
     os.makedirs(args.out, exist_ok=True)
-    frames, total_in, total_out = [], 0, 0
+    frames, regional_frames, total_in, total_out = [], [], 0, 0
 
     for minutes in LEAD_MINUTES:
         try:
@@ -92,23 +93,25 @@ def main():
         # beyond it — found on Jason's phone 2026-09-02. It is a field, like
         # wind: it paints everywhere inside its cell, so the cell's edge *is*
         # the picture.
-        boxes = list(render.cells()) + [(NATIONAL_ID, NATIONAL_BBOX)]
+        boxes = list(render.cells()) + regional_cells() + [(NATIONAL_ID, NATIONAL_BBOX)]
 
         for name, bbox in boxes:
             # Half the radar's resolution. Cloud is a far smoother field than
             # reflectivity — there is no storm edge to keep sharp — so the
             # extra pixels carried no information and quadrupled the bytes.
-            size = ((NATIONAL_SIZE[0] // 2, NATIONAL_SIZE[1] // 2)
-                    if name == NATIONAL_ID
-                    else (render.FORECAST_CELL_SIZE[0] // 2,
-                          render.FORECAST_CELL_SIZE[1] // 2))
+            if name == NATIONAL_ID:
+                size = (NATIONAL_SIZE[0] // 2, NATIONAL_SIZE[1] // 2)
+            elif is_regional(name):
+                size = CLOUD_REGIONAL_SIZE          # the regional tier (item 11)
+            else:
+                size = (render.FORECAST_CELL_SIZE[0] // 2, render.FORECAST_CELL_SIZE[1] // 2)
             image = render.render(values, meta, bbox, size, paint=colourise,
                                   edge_cells=EDGE_FADE_CELLS)
             filename = f"{name}-cloud-{minutes:04d}.png"
             path = os.path.join(args.out, filename)
             image.save(path, optimize=True)
             total_out += os.path.getsize(path)
-            frames.append({
+            (regional_frames if is_regional(name) else frames).append({
                 "cell": name, "leadMinutes": minutes, "image": filename,
                 "validTime": when.strftime("%Y-%m-%dT%H:%M:%SZ") if when else None,
                 "west": bbox[0], "south": bbox[1], "east": bbox[2], "north": bbox[3],
@@ -123,6 +126,10 @@ def main():
         "alphaSteps": ALPHA_STEPS,
         "edgeFadeCells": EDGE_FADE_CELLS,
         "frames": frames,
+        # The regional tier (radar build 7, item 11): the cloud and wind manifests carry each frame's box
+        # inside `frames`, where the installed builds would draw these at 12 to 20 degrees, so they sit
+        # under their own key instead.
+        REGIONAL_KEY: {"frames": regional_frames},
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, separators=(",", ":"))

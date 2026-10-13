@@ -180,3 +180,59 @@ MID_SIZE = FORECAST_CELL_SIZE
 # a pixel, so it is published at half the close cells' resolution — a quarter
 # of the samples for a picture that looks the same across a region.
 MID_WIND_STEP_DEG = 0.1
+
+
+# --- The regional tier (radar build 7, item 11; D-232, B-76) -----------
+#
+# Twenty-four-degree pictures on a twelve-degree grid, between the wide tier
+# and the national picture. The app draws one picture per view (D-232), so a
+# view too wide for a 10 x 7 wide cell used to fall to the national picture's
+# 38.7 px a degree, drawn under the cell covering most of the view with a
+# straight line between them: the "zone lines" Jason reported 2026-10-09.
+# With a 24-degree picture every 12 degrees, any view up to 12 degrees wide
+# centred inside the model's domain is held by one picture with 6 degrees to
+# spare on each side, and the view up to about 11 degrees is drawn from one
+# evenly sharp picture.
+#
+# The grid covers the HRRR and MRMS CONUS domains (about 134W to 61W, 21N to
+# 52.6N): six columns by two rows, 12 pictures. Hawaii, Alaska and Puerto
+# Rico are outside both models; `test_cells.py` keeps them out of every tier.
+#
+# Ids are prefixed `region-`, a prefix of its own: the installed builds'
+# `MeasuredRain.Tier` reads `national` and `wide-` and calls everything else
+# a close cell, so these frames go under their own manifest key, `regional`,
+# which every installed decoder ignores, never into `frames` or `cells`.
+#
+# Density: the measured and nowcast tier at 100 px a degree, 1:1 with the
+# 1 km mosaic (0.01 degrees), so nothing between samples is lost; the
+# forecast tier at 80 (HRRR's own 37 px a degree, 2.2x over); cloud at 40 as
+# cloud is half the radar's density everywhere; wind at 0.1 degrees like the
+# wide tier. Jason's look on his phone at 80 against 100 decides the
+# forecast's (the plan's "Rulings for Jason later").
+REGIONAL_SPAN = (24.0, 24.0)
+REGIONAL_ORIGINS = [
+    (f"region-{abs(west):03d}-{south:02d}", float(west), float(south))
+    for south in (21, 33)
+    for west in (-134, -122, -110, -98, -86, -74)
+]
+REGIONAL_PX_PER_DEGREE = 100          # measured and nowcast: 1:1 with the mosaic
+REGIONAL_SIZE = (int(REGIONAL_SPAN[0] * REGIONAL_PX_PER_DEGREE),
+                 int(REGIONAL_SPAN[1] * REGIONAL_PX_PER_DEGREE))
+FORECAST_REGIONAL_PX_PER_DEGREE = 80
+FORECAST_REGIONAL_SIZE = (int(REGIONAL_SPAN[0] * FORECAST_REGIONAL_PX_PER_DEGREE),
+                          int(REGIONAL_SPAN[1] * FORECAST_REGIONAL_PX_PER_DEGREE))
+CLOUD_REGIONAL_SIZE = (FORECAST_REGIONAL_SIZE[0] // 2, FORECAST_REGIONAL_SIZE[1] // 2)
+REGIONAL_WIND_STEP_DEG = 0.1
+REGIONAL_PREFIX = "region-"
+REGIONAL_KEY = "regional"
+
+
+def regional_cells():
+    """Every regional picture as (id, bbox), west/south/east/north."""
+    return [(name, (west, south, west + REGIONAL_SPAN[0], south + REGIONAL_SPAN[1]))
+            for name, west, south in REGIONAL_ORIGINS]
+
+
+def is_regional(name):
+    return name.startswith(REGIONAL_PREFIX)
+
