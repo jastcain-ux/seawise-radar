@@ -62,8 +62,10 @@ jobs:
           HRRR_RUN: ${{ inputs.run }}
         run: python render.py --regional --out site/forecast-regional
 
-      - name: Prune pictures the timeline can no longer reach, an hour after their publication
-        run: python prune.py --dir site/forecast-regional --keep-newer-than 60
+      # 135, as the main workflow's forecast prune: the stamp is the publication,
+      # about an hour apart, so 60 would remove the previous set as it is replaced.
+      - name: Prune pictures the timeline can no longer reach, an hour after they are replaced
+        run: python prune.py --dir site/forecast-regional --keep-newer-than 135
 
       - name: Carry the tier to the next run
         uses: actions/cache/save@v4

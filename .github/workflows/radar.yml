@@ -251,8 +251,13 @@ jobs:
         continue-on-error: true
         run: python cloud.py --out public/cloud
 
-      - name: Prune forecast frames the timeline can no longer reach, an hour after their publication
-        run: python prune.py --dir public --keep-newer-than 60
+      # A forecast name's stamp is its publication (render.py `_PUB`), and the gate
+      # publishes about once an hour, so a window of 60 removed the previous set in
+      # the very run that replaced it (the build reader, 2026-10-13). 135 is one
+      # publication interval at its longest seen (75 minutes) plus the hour a phone
+      # may still hold the previous manifest.
+      - name: Prune forecast frames the timeline can no longer reach, an hour after they are replaced
+        run: python prune.py --dir public --keep-newer-than 135
 
       - name: Carry the frames to the next run
         uses: actions/cache/save@v4
