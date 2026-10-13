@@ -97,7 +97,7 @@ jobs:
       # Measured radar, every run. Cheap: one or two new frames per run,
       # about 1.5 MB in and 400 KB out each.
       - name: Unit tests for the renderer maths
-        run: python -m unittest test_cells test_nowcast test_render test_steps
+        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate
 
       - name: Render measured frames
         run: python observed.py --out public/observed
@@ -190,53 +190,21 @@ jobs:
           name: public-after-measured
           path: public
 
-      - name: Render forecast frames if the run has moved on
+      - name: Render forecast frames when NOMADS has a newer run
         id: forecast
+        # The decision is gate.py's (radar build 7, item 11a; B-263): a newer
+        # complete run, a short published set, a changed layout or colour
+        # rule renders; the same run whole skips; NOMADS down skips. Until
+        # build 7 the gate here re-rendered whenever the published run was
+        # over 90 minutes old, which the newest complete run always is, so
+        # three ticks in four redrew the run already live.
+        #
+        # gate.py writes the run it chose to hrrr-run.txt (this step) and to
+        # GITHUB_ENV (the wind and cloud steps), so all three come from one run.
         run: |
-          if python - <<'EOF'
-          import datetime, json, os, sys
-          sys.path.insert(0, ".")
-          import cells as layout
-          path = "public/manifest.json"
-          if not os.path.exists(path):
-              sys.exit(0)                      # nothing published yet: render
-          published = json.load(open(path))
-          # A changed cell list must re-render, whatever the age says.
-          #
-          # Without this the layout only reached the site when the age gate
-          # happened to fire, so adding cells for the deep Gulf and the inland
-          # lakes published nothing for over an hour and looked like a broken
-          # workflow. The manifest should describe the code, and this is what
-          # makes that true rather than eventually true.
-          want = {n for n, _, _ in layout.FORECAST_CELL_ORIGINS} | {layout.NATIONAL_ID}
-          if {c["id"] for c in published.get("cells", [])} != want:
-              print("cell layout changed; re-rendering")
-              sys.exit(0)
-          # The colour rule is part of the picture too. Without this a ramp
-          # change published nothing until the run aged out, and every frame
-          # in between was drawn to the old rule while the code said the new.
-          import render
-          if published.get("rampSteps") != render.RAMP_STEPS:
-              print("ramp changed; re-rendering")
-              sys.exit(0)
-          if published.get("quantiser") != render.QUANTISER:
-              print("quantiser changed; re-rendering")
-              sys.exit(0)
-          if published.get("palette") != render.PALETTE:
-              print("palette changed; re-rendering")
-              sys.exit(0)
-          if published.get("smoothing") != render.SMOOTH_CELLS:
-              print("smoothing changed; re-rendering")
-              sys.exit(0)
-          if published.get("alpha") != render.ALPHA:
-              print("opacity changed; re-rendering")
-              sys.exit(0)
-          run = published["runTime"].replace("Z", "+00:00")
-          age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(run)
-          sys.exit(0 if age.total_seconds() > 5400 else 1)
-          EOF
+          if python gate.py --manifest public/manifest.json --run-file hrrr-run.txt
           then
-            python render.py --out public
+            HRRR_RUN="$(cat hrrr-run.txt 2>/dev/null)" python render.py --out public
             # Announced rather than inferred. The step succeeds either way —
             # it is an if/then/else in shell — so `outcome == success` is true
             # even when nothing was rendered, and gating wind on that would

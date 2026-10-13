@@ -298,6 +298,22 @@ def latest_complete_run(now=None):
     raise SystemExit("no complete HRRR run published in the last 10 hours")
 
 
+def chosen_run(now=None):
+    """The run this workflow chose, else the newest complete one.
+
+    The forecast gate (`gate.py`, radar build 7's item 11a) picks the run once
+    and hands it on through `HRRR_RUN` as `YYYYMMDDHH`, so the pictures, the
+    wind and the cloud of one run come from the same run: each used to ask
+    NOMADS for the newest itself, minutes apart, and a run completing in
+    between gave the wind and cloud a newer run than the pictures. Run by hand
+    with no `HRRR_RUN`, it asks NOMADS as before.
+    """
+    chosen = os.environ.get("HRRR_RUN", "").strip()
+    if len(chosen) == 10 and chosen.isdigit():
+        return chosen[:8], int(chosen[8:10])
+    return latest_complete_run(now)
+
+
 def read_refc(day, run, minutes):
     lo, hi = refc_byte_range(day, run, minutes)
     raw = _get(_url(day, run, minutes), (lo, hi))
@@ -443,7 +459,7 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    day, run = latest_complete_run()
+    day, run = chosen_run()
     run_at = datetime.datetime.strptime(f"{day}{run:02d}", "%Y%m%d%H").replace(
         tzinfo=datetime.timezone.utc)
     print(f"HRRR run {run_at.isoformat()}")

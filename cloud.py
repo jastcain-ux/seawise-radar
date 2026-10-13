@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--out", default="public/cloud")
     args = ap.parse_args()
 
-    day, run = render.latest_complete_run()
+    day, run = render.chosen_run()
     os.makedirs(args.out, exist_ok=True)
     frames, total_in, total_out = [], 0, 0
 
