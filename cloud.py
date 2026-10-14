@@ -24,6 +24,7 @@ from cells import (NATIONAL_BBOX, NATIONAL_ID, NATIONAL_SIZE,  # noqa: E402
                    CLOUD_REGIONAL_SIZE, REGIONAL_KEY, is_regional, regional_cells)
 import render                                        # noqa: E402
 import wind                                          # noqa: E402
+from naming import field_image, publication_stamp    # noqa: E402
 
 LEAD_MINUTES = list(range(0, 6 * 60 + 1, 60))
 FIELD, LEVEL = "TCDC", "entire atmosphere"
@@ -73,6 +74,10 @@ def main():
     ap.add_argument("--out", default="public/cloud")
     args = ap.parse_args()
 
+    # One publication: its stamp ends every name written here and its time is
+    # the manifest's `generatedAt`, as render.py does for the radar (B-282).
+    published_at = datetime.datetime.now(datetime.timezone.utc)
+    stamp = publication_stamp(published_at)
     day, run = render.chosen_run()
     os.makedirs(args.out, exist_ok=True)
     frames, regional_frames, total_in, total_out = [], [], 0, 0
@@ -107,7 +112,9 @@ def main():
                 size = (render.FORECAST_CELL_SIZE[0] // 2, render.FORECAST_CELL_SIZE[1] // 2)
             image = render.render(values, meta, bbox, size, paint=colourise,
                                   edge_cells=EDGE_FADE_CELLS)
-            filename = f"{name}-cloud-{minutes:04d}.png"
+            # Named by its publication, never overwritten: a phone on the previous
+            # manifest is never handed this run's picture under its hour (B-282).
+            filename = field_image(name, "cloud", minutes, stamp)
             path = os.path.join(args.out, filename)
             image.save(path, optimize=True)
             total_out += os.path.getsize(path)
@@ -120,8 +127,7 @@ def main():
     manifest = {
         "model": "HRRR", "field": "tcdc", "unit": "percent",
         "runTime": f"{day[:4]}-{day[4:6]}-{day[6:]}T{run:02d}:00:00Z",
-        "generatedAt": datetime.datetime.now(datetime.timezone.utc)
-            .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generatedAt": published_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "maxAlpha": MAX_ALPHA,
         "alphaSteps": ALPHA_STEPS,
         "edgeFadeCells": EDGE_FADE_CELLS,

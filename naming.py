@@ -11,6 +11,12 @@ with new bytes, so an open Radar tab kept old pictures beside new ones
 it, a measured name in the revision of the drawing rule, and `prune.py`
 keeps the previous set an hour before removing it. The manifests still
 switch last (`publish_r2.py`).
+
+The cloud and wind pictures were the last named by cell and lead alone: each
+forecast run overwrote them in place, so a phone on the previous manifest got
+the next run's picture under its old hour (B-282). They now end in their
+publication's stamp too, through `field_image`, the one rule both scripts use
+(they import eccodes, so the rule lives here where the pure tests reach it).
 """
 import hashlib
 import json
@@ -22,6 +28,15 @@ STAMP = re.compile(r"(\d{8}T\d{4})Z")
 def publication_stamp(now):
     """A UTC instant as the token a name carries: 20261013T0120Z."""
     return now.strftime("%Y%m%dT%H%MZ")
+
+
+def field_image(cell, kind, minutes, stamp):
+    """A cloud or wind picture's name: cell, kind, lead and publication (B-282).
+
+    `field_image("national", "wind", 60, "20261014T0519Z")` is
+    `national-wind-0060-20261014T0519Z.png`, the forecast radar's shape.
+    """
+    return f"{cell}-{kind}-{minutes:04d}-{stamp}.png"
 
 
 def style_revision(style):

@@ -260,8 +260,17 @@ jobs:
       # the very run that replaced it (the build reader, 2026-10-13). 135 is one
       # publication interval at its longest seen (75 minutes) plus the hour a phone
       # may still hold the previous manifest.
+      #
+      # Cloud and wind (B-282): their names carry the publication's stamp too, and
+      # their sets are kept 135 minutes from when the next set replaced them, not
+      # from their own stamp, so a long gap between publishes never deletes the set
+      # just replaced. The names from before B-282 carried no stamp; they are kept
+      # until the first stamped set has been standing 135 minutes, then go.
       - name: Prune forecast frames the timeline can no longer reach, an hour after they are replaced
-        run: python prune.py --dir public --keep-newer-than 135
+        run: |
+          python prune.py --dir public --keep-newer-than 135
+          python prune.py --dir public/cloud --keep-newer-than 135 --from-replacement --unstamped-as-old-as-stamped
+          python prune.py --dir public/wind --keep-newer-than 135 --from-replacement --unstamped-as-old-as-stamped
 
       - name: Carry the frames to the next run
         uses: actions/cache/save@v4
