@@ -492,8 +492,13 @@ def main():
 
     # Where no radar sees (B-33 item 2), from the newest step read: after the
     # frames and before the manifest, so a manifest names only masks on disk.
-    # A failure here costs the masks, never the frames.
-    coverage = write_coverage(args.out, coverage_cells(wanted_cells), size, held, published.get("coverage"))
+    # A layer, not the screen: any failure here costs the masks, never the
+    # frames or the manifest.
+    try:
+        coverage = write_coverage(args.out, coverage_cells(wanted_cells), size, held, published.get("coverage"))
+    except Exception as e:                                  # noqa: BLE001 - reported, never substituted
+        print(f"  coverage: SKIPPED: {e}", file=sys.stderr)
+        coverage = None
 
     manifest = {
         "product": "MRMS MergedReflectivityQCComposite",

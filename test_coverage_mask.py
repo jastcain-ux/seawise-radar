@@ -182,6 +182,10 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(named_by(manifest), {"a.png", "m.png", "old.png"})
         self.assertEqual(to_remove(["m.png", "old.png"], named_by(manifest), self.NOW, 180), [])
 
+    def test_a_malformed_coverage_block_never_stops_the_prune(self):
+        for coverage in ("text", [], {"frames": "x"}, {"frames": [{"cell": "a"}], "replaced": [7, {"image": 3}]}):
+            self.assertEqual(named_by({"frames": [{"image": "a.png"}], "coverage": coverage}), {"a.png"})
+
     def test_a_mask_no_manifest_names_goes(self):
         manifest = {"coverage": {"frames": [{"cell": "a", "image": "m.png"}]}}
         self.assertEqual(to_remove(["m.png", "gone.png"], named_by(manifest), self.NOW, 180), ["gone.png"])
@@ -438,6 +442,20 @@ class MainTests(unittest.TestCase):
         self.assertEqual(drawn, [])
         self.assertEqual(third["coverage"]["frames"], first["coverage"]["frames"])
         self.assertEqual(third["coverage"]["observedTime"], "2026-10-26T15:10:00Z")
+
+    def test_a_failure_in_the_masks_costs_the_masks_never_the_frames(self):
+        self.grids = {"k1": self.a, "k2": self.a}
+        saved = self.observed.write_coverage
+
+        def broken(*a, **k):
+            raise RuntimeError("planted")
+        self.observed.write_coverage = broken
+        try:
+            manifest = self.run_main([(self.T1, "k1"), (self.T2, "k2")])
+        finally:
+            self.observed.write_coverage = saved
+        self.assertNotIn("coverage", manifest)
+        self.assertEqual(len(manifest["frames"]), 2)
 
     def test_a_run_that_mends_an_older_frame_never_turns_the_coverage_back(self):
         self.grids = {"k1": self.a, "k2": self.b}

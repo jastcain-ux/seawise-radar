@@ -68,8 +68,13 @@ def named_by(manifest):
     """Every picture the manifest names: its `frames`, its regional tier's and its coverage masks (absent, none)."""
     named = {frame["image"] for frame in manifest.get("frames", [])}
     named |= {frame["image"] for frame in (manifest.get("regional") or {}).get("frames", [])}
-    coverage = manifest.get("coverage") or {}
-    named |= {frame["image"] for frame in coverage.get("frames", []) + coverage.get("replaced", [])}
+    # The coverage block is read tolerantly: a malformed one must never stop the measured job's prune.
+    coverage = manifest.get("coverage")
+    if isinstance(coverage, dict):
+        for key in ("frames", "replaced"):
+            entries = coverage.get(key)
+            if isinstance(entries, list):
+                named |= {e["image"] for e in entries if isinstance(e, dict) and isinstance(e.get("image"), str)}
     return named
 
 
