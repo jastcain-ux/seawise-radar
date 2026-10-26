@@ -51,7 +51,7 @@ from render import (ALPHA, CONUS_BBOX, MERCATOR_R, PALETTE, QUANTISER, RAMP,
 from smoothing import shape
 from peaks import band_tops, pixels_of, halo_bbox
 from naming import style_revision
-from coverage import coverage_image, coverage_name, pixel_coords, unseen
+from coverage_mask import coverage_image, grid_digest, mask_name, pixel_coords, unseen
 from steps import select
 
 BUCKET = "https://noaa-mrms-pds.s3.amazonaws.com"
@@ -138,33 +138,43 @@ def coverage_cells(wanted_cells):
     return [(n, b) for n, b in wanted_cells if n != NATIONAL_ID and not is_regional(n)]
 
 
-def write_coverage(out, when, key, wanted, close_size, held):
-    """The newest step's masks (B-33 item 2): each one missing is drawn, and the ones on disk are listed.
+def write_coverage(out, wanted, close_size, held, previous):
+    """The manifest's `coverage` block (B-33 item 2), each mask it names drawn if it is not on disk.
 
-    `held` is (when, values, meta) for the step the run last read, or None; the
-    step is read again only when it is not that one (a run that drew no new
-    measured frame, the first run after this change).
+    `held` is (when, values, meta) for the newest step the run read. The masks
+    are named by what they show (`coverage_mask.mask_name`), so while NOAA's
+    coverage stands still every run names the files already there and draws
+    nothing. With no step read this run, `previous`, the last manifest's
+    block, stands while its masks are on disk. A mask that fails is left out,
+    never substituted; with none, there is no block.
     """
-    stamp = when.strftime("%Y%m%dT%H%M") + "Z"
-    todo = [(n, b) for n, b in wanted if not os.path.exists(os.path.join(out, coverage_name(n, stamp)))]
-    if todo:
-        if held is not None and held[0] == when:
-            values, meta = held[1], held[2]
-        else:
+    if held is None:
+        if previous and previous.get("frames") and all(
+                os.path.exists(os.path.join(out, f.get("image", ""))) for f in previous["frames"]):
+            return previous
+        return None
+    when, values, meta = held
+    grid = grid_digest(values, meta)
+    frames = []
+    for name, bbox in wanted:
+        px = pixel_size(name, close_size)
+        image = mask_name(name, grid, bbox, px, SHAPE_HALO_PX)
+        path = os.path.join(out, image)
+        if not os.path.exists(path):
             try:
-                values, meta, _ = read_frame(key)
+                # Written aside and moved into place, so a failure never leaves a broken mask under its name.
+                coverage_image(unseen(values, meta, bbox, px, MERCATOR_R, SHAPE_HALO_PX)).save(
+                    path + ".part", format="PNG", optimize=True)
+                os.replace(path + ".part", path)
             except Exception as e:                          # noqa: BLE001 - reported, never substituted
-                print(f"  coverage {when:%H:%M}Z  SKIPPED: {e}", file=sys.stderr)
-                values = None
-        if values is not None:
-            for name, bbox in todo:
-                try:
-                    mask = unseen(values, meta, bbox, pixel_size(name, close_size), MERCATOR_R, SHAPE_HALO_PX)
-                    coverage_image(mask).save(os.path.join(out, coverage_name(name, stamp)), optimize=True)
-                except Exception as e:                      # noqa: BLE001 - reported, never substituted
-                    print(f"  coverage {when:%H:%M}Z {name}: SKIPPED: {e}", file=sys.stderr)
-    return [{"cell": n, "image": coverage_name(n, stamp)} for n, _ in wanted
-            if os.path.exists(os.path.join(out, coverage_name(n, stamp)))]
+                print(f"  coverage {when:%H:%M}Z {name}: SKIPPED: {e}", file=sys.stderr)
+                continue
+        frames.append({"cell": name, "image": image})
+    if not frames:
+        return None
+    return {"observedTime": when.isoformat().replace("+00:00", "Z"),
+            "meaning": "alpha 255 where no radar sees: never rain, and never dry",
+            "frames": frames}
 
 
 def cells():
@@ -320,7 +330,7 @@ def render(values, meta, bbox, size, tops=None, block=None):
 
     wanted, wanted_size = bbox, size
     bbox, size = halo_bbox(bbox, size, SHAPE_HALO_PX)
-    # The pixel grid is coverage.py's, shared with the masks (B-33 item 2).
+    # The pixel grid is coverage_mask.py's, shared with the masks (B-33 item 2).
     fx, fy, inside = pixel_coords(meta, bbox, size, MERCATOR_R)
     interpolated = ndimage.map_coordinates(field, [fy, fx], order=3,
                                            mode="nearest", prefilter=True)
@@ -376,14 +386,11 @@ def main():
         print(f"drawing rule changed; drawing every measured frame under revision {rev}")
 
     frames, regional_frames, downloaded, reused, rendered = [], [], 0, 0, 0
-    filed = {}          # each step with a frame filed, time -> key: the masks are the newest one's
-    held = None         # (when, values, meta) of the step last read, so its masks need no second download
+    held = None         # (when, values, meta) of the newest step read, which the coverage masks are drawn from
 
     def file_frame(name, when, image_name):
         entry = {"observedTime": when.isoformat().replace("+00:00", "Z"), "cell": name, "image": image_name}
         (regional_frames if is_regional(name) else frames).append(entry)
-        if not is_regional(name):
-            filed[when] = key
     for when, key in steps:
         stamp = when.strftime("%Y%m%dT%H%M") + "Z"
         # Which cells still need this step. One GRIB read serves all of them,
@@ -446,12 +453,10 @@ def main():
     if not frames:
         raise SystemExit("no frames rendered; leaving the previous manifest in place")
 
-    # Where no radar sees, for the newest step with a frame (B-33 item 2): drawn
-    # after the frames and before the manifest, so a manifest names only masks
-    # on disk. A failure here costs the masks, never the frames.
-    coverage_when = max(filed)
-    coverage_frames = write_coverage(args.out, coverage_when, filed[coverage_when],
-                                     coverage_cells(wanted_cells), size, held)
+    # Where no radar sees (B-33 item 2), from the newest step read: after the
+    # frames and before the manifest, so a manifest names only masks on disk.
+    # A failure here costs the masks, never the frames.
+    coverage = write_coverage(args.out, coverage_cells(wanted_cells), size, held, published.get("coverage"))
 
     manifest = {
         "product": "MRMS MergedReflectivityQCComposite",
@@ -481,15 +486,11 @@ def main():
         },
         "frames": frames,
     }
-    # Where no radar sees (B-33 item 2), under a key the installed builds ignore: one mask per close and wide cell
-    # for the newest step, each its picture's size and pixels, alpha 255 where no radar sees. Its absence means
-    # nothing is known, never that everything is seen.
-    if coverage_frames:
-        manifest["coverage"] = {
-            "observedTime": coverage_when.isoformat().replace("+00:00", "Z"),
-            "meaning": "alpha 255 where no radar sees: never rain, and never dry",
-            "frames": coverage_frames,
-        }
+    # Where no radar sees (B-33 item 2), under a key the installed builds ignore: one mask per close and wide cell,
+    # each its picture's size and pixels, alpha 255 where no radar sees; `observedTime` is the step it was read
+    # from. Its absence means nothing is known, never that everything is seen.
+    if coverage:
+        manifest["coverage"] = coverage
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
     print(f"{len(steps)} steps x {len(wanted_cells)} cells: "

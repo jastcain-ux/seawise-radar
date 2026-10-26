@@ -130,16 +130,19 @@ python prune.py --dir public/observed         # drop anything the manifest dropp
 Frames already on disk are reused, so a ten-minute run pulls one new frame
 rather than re-rendering the lot.
 
-**Where no radar sees** (`coverage.py`, SeaWise B-33 item 2). MRMS writes -99
+**Where no radar sees** (`coverage_mask.py`, SeaWise B-33 item 2). MRMS writes -99
 where a radar looked and found no echo and -999 where no radar looks; the
 pictures draw both clear, so a sampled picture cannot tell dry water from water
 nobody watches (on 2026-10-26 at 15:06Z, 85% of the gulf-central cell). Each
-close and wide cell of the newest step therefore gets a mask, `{cell}-{stamp}-coverage.png`:
-its picture's size and pixels, grey at alpha 255 where no radar sees, clear
-elsewhere, 0.5 to 3 KB as a two-colour PNG. The manifest names them under
-`coverage` (a key the installed builds ignore), and the app's rain reading is
-to answer "inconclusive", never "dry", where one is painted. About 6 seconds a
-run for all 63, on the step the run has already read.
+close and wide cell therefore gets a mask, drawn from the newest step the run
+read: its picture's size and pixels, grey at alpha 255 where no radar sees,
+clear elsewhere, 0.5 to 3 KB as a two-colour PNG. A mask is named by what it
+shows, `{cell}-coverage-{digest}.png`, and NOAA's no-coverage area hardly moves,
+so most runs name the files already there and draw and upload nothing; when it
+moves, the 63 are drawn again (about 6 s on a Mac). The manifest names them
+under `coverage` (a key the installed builds ignore), with the time of the step
+they were read from, and the app's rain reading is to answer "inconclusive",
+never "dry", where one is painted.
 
 ## publish_r2.py — the copy in Cloudflare R2
 
