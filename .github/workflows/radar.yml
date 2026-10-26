@@ -44,14 +44,25 @@ on:
 
 # One at a time. Two overlapping runs would race to commit the same frames.
 #
-# Two jobs and two deploys since 2026-09-02 (B-20). The measured frames and the
-# projection are rendered and published first, a few minutes into the run; the
-# forecast, wind and cloud follow from the same files and publish again. Before
+# Two jobs and two deploys since 2026-09-02 (B-20). The measured frames are
+# rendered and published first, a few minutes into the run; the forecast,
+# wind and cloud follow from the same files and publish again. Before
 # this the measured frames waited for everything else and went live ~15 minutes
 # old, so for a third to half of every cycle the app rightly refused them as
 # past 30 minutes and drew NOAA's tiles instead. The second job starts from the
 # first job's files, not from the live site, so it can never republish older
 # measured frames over fresher ones; and its deploy waits for the first.
+#
+# The nowcast has a job of its own between them since B-20's renderer half
+# (2026-10-26). It took 137 to 285 seconds (median 219, 58 runs on
+# 2026-10-26) inside the measured job, ahead of the measured publish, so every
+# measured frame and the lightning index went live that much older. Now the
+# measured half publishes as soon as it is drawn; the nowcast job takes its
+# files, draws the projection and publishes again to R2 (r2-nowcast), and the
+# forecast job takes the nowcast job's files. GitHub Pages gets the nowcast
+# with deploy-full: a third Pages deploy would be one more chance of the stuck
+# deploy that once held the run's lock and froze both hosts (B-238), and Pages
+# serves only builds up to 1.0 (12).
 concurrency:
   group: helmcast-radar
   cancel-in-progress: false
@@ -97,16 +108,10 @@ jobs:
       # Measured radar, every run. Cheap: one or two new frames per run,
       # about 1.5 MB in and 400 KB out each.
       - name: Unit tests for the renderer maths
-        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate test_prune
+        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate test_prune test_workflow
 
       - name: Render measured frames
         run: python observed.py --out public/observed
-
-      # Extrapolated measured radar for the next two hours (D-64). A layer,
-      # not the screen, so it must not take the run down.
-      - name: Render the nowcast from the last two measured frames
-        continue-on-error: true
-        run: python nowcast.py --out public/nowcast
 
       # Observed lightning, every run. NOAA's GLM buckets publish a file every
       # 20 seconds, and the script carries forward what it published last time
@@ -126,25 +131,26 @@ jobs:
         continue-on-error: true
         run: python lightning.py --minutes 30 --out public/lightning
 
-      # Each keeps the set a phone's manifest may still name (radar build 7, item 21; B-258): the measured
-      # stamps are the frames' own times, up to an hour past the two-hour window; the nowcast's its run's.
-      - name: Prune measured and projected frames the timeline can no longer reach, an hour after
-        run: |
-          python prune.py --dir public/observed --keep-newer-than 180
-          python prune.py --dir public/nowcast --keep-newer-than 70
+      # Keeps the set a phone's manifest may still name (radar build 7, item 21; B-258): the measured
+      # stamps are the frames' own times, up to an hour past the two-hour window. The nowcast's prune is
+      # in its own job, after its render.
+      - name: Prune measured frames the timeline can no longer reach, an hour after
+        run: python prune.py --dir public/observed --keep-newer-than 180
 
-      # Carried forward twice a run: here, so a failed forecast job still
-      # leaves the next run a fresh measured set to restore; and again after
-      # the forecast. `restore-keys` picks the newest, whichever that is.
+      # Carried forward three times a run: here, so a failed nowcast or
+      # forecast job still leaves the next run a fresh measured set to
+      # restore; after the nowcast; and after the forecast. `restore-keys`
+      # picks the newest, whichever that is.
       - name: Carry the frames to the next run (measured)
         uses: actions/cache/save@v4
         with:
           path: public
           key: helmcast-radar-${{ github.run_id }}-${{ github.run_attempt }}-measured
 
-      # Handed to the forecast job as files, never re-read from the live site:
-      # Pages takes a moment to serve a new deploy, and a job that restored
-      # the previous site would republish older measured frames over these.
+      # Handed to the nowcast job (and to the forecast job when the nowcast
+      # job fails) as files, never re-read from the live site: Pages takes a
+      # moment to serve a new deploy, and a job that restored the previous
+      # site would republish older measured frames over these.
       - name: Hand the files to the forecast job
         uses: actions/upload-artifact@v4
         with:
@@ -171,8 +177,71 @@ jobs:
         with:
           artifact_name: pages-measured
 
-  forecast:
+  # Extrapolated measured radar for the next two hours (D-64), after the
+  # measured half has gone out (B-20). nowcast.py reads its two MRMS frames
+  # from NOAA itself, the newest at the moment it runs, as it did inside the
+  # measured job. A layer, not the screen: a failed render leaves the previous
+  # nowcast in place and the run goes on.
+  nowcast:
     needs: measured
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Take the files from the measured job
+        uses: actions/download-artifact@v4
+        with:
+          name: public-after-measured
+          path: public
+
+      - name: Render the nowcast from the last two measured frames
+        continue-on-error: true
+        run: python nowcast.py --out public/nowcast
+
+      # The nowcast's stamps are its run's: kept 70 minutes, an hour past the replacement a phone may not
+      # have fetched yet (radar build 7, item 21; B-258).
+      - name: Prune projected frames the timeline can no longer reach, an hour after
+        run: python prune.py --dir public/nowcast --keep-newer-than 70
+
+      # Carried here too, so a failed forecast job still leaves the next run
+      # this nowcast and the set its prune is keeping.
+      - name: Carry the frames to the next run (nowcast)
+        uses: actions/cache/save@v4
+        with:
+          path: public
+          key: helmcast-radar-${{ github.run_id }}-${{ github.run_attempt }}-nowcast
+
+      - name: Hand the files to the forecast job
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-after-nowcast
+          path: public
+          retention-days: 1
+          if-no-files-found: error
+
+      # Packed as Pages packs a site, for r2-nowcast alone; never deployed to Pages.
+      - name: Publish the measured half with the nowcast
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: pages-nowcast
+          path: public
+
+  forecast:
+    # After the nowcast job, from its files; from the measured job's when the
+    # nowcast job itself failed, so the forecast still goes out (B-20).
+    needs: [measured, nowcast]
+    if: ${{ !cancelled() && needs.measured.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     # actions: write for one step, the dispatch of the regional tier's workflow.
@@ -194,7 +263,15 @@ jobs:
       - name: Install
         run: pip install -r requirements.txt
 
-      - name: Take the files from the measured job
+      - name: Take the files from the nowcast job
+        if: needs.nowcast.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: public-after-nowcast
+          path: public
+
+      - name: Take the files from the measured job, the nowcast job having failed
+        if: needs.nowcast.result != 'success'
         uses: actions/download-artifact@v4
         with:
           name: public-after-measured
@@ -293,7 +370,12 @@ jobs:
   deploy-full:
     # After the measured deploy, never before it: this site is a superset of
     # that one, and Pages serves whichever deploy landed last.
+    #
+    # Said outright since the nowcast job (B-20): a job with no `if:` is
+    # skipped when any job before it failed, the nowcast job included, and a
+    # failed nowcast must not cost Pages the forecast.
     needs: [forecast, deploy-measured]
+    if: ${{ !cancelled() && needs.forecast.result == 'success' && needs.deploy-measured.result == 'success' }}
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
@@ -356,11 +438,53 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: python publish_r2.py --dir site --ignore-prefix forecast-regional/
 
+  # The measured half with the new nowcast (B-20), after the measured copy:
+  # this site is a superset of that one. Only R2 gets this stage (above).
+  r2-nowcast:
+    needs: [nowcast, r2-measured]
+    if: ${{ !cancelled() && needs.nowcast.result == 'success' }}
+    runs-on: ubuntu-24.04
+    # Short on purpose: the next run waits for this one (publish_r2.py, top).
+    timeout-minutes: 4
+    continue-on-error: true
+    # Reads its own repo and this run's artifacts; never Pages or the OIDC token.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-r2.txt
+
+      - name: Install
+        run: pip install -r requirements-r2.txt
+
+      - name: Take the measured half and the nowcast
+        uses: actions/download-artifact@v4
+        with:
+          name: pages-nowcast
+          path: artifact
+
+      - name: Unpack it
+        run: mkdir site && tar -xf artifact/artifact.tar -C site
+
+      - name: Publish the measured half and the nowcast to R2
+        # The write keys reach this step alone, not checkout, pip or the tests.
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python publish_r2.py --dir site --ignore-prefix forecast-regional/
+
   r2-full:
-    # After the measured copy, never before it, as deploy-full follows
-    # deploy-measured: this site is a superset of that one. It still runs when
-    # the measured copy failed, so one bad publish is mended by the next.
-    needs: [forecast, r2-measured]
+    # After the nowcast copy and the measured copy, never before them, as
+    # deploy-full follows deploy-measured: this site is a superset of both.
+    # It still runs when either failed or was skipped, so one bad publish is
+    # mended by the next.
+    needs: [forecast, r2-nowcast]
     if: ${{ !cancelled() && needs.forecast.result == 'success' }}
     runs-on: ubuntu-24.04
     # Short on purpose: the next run waits for this one (publish_r2.py, top).

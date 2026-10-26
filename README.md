@@ -138,7 +138,10 @@ GitHub Pages into the R2 bucket `seawise-radar`, served at
 address from 1.1; GitHub Pages keeps publishing for every older build.
 
 - **Its own jobs**, `r2-measured` and `r2-full`, each unpacking the Pages
-  artifact its deploy uses. No deploy needs them, and a failure leaves the run
+  artifact its deploy uses, and `r2-nowcast` between them, the measured half
+  with the new nowcast, which R2 alone gets (SeaWise B-20: the nowcast is
+  drawn in its own job after the measured publish, and Pages takes it with the
+  full site). No deploy needs them, and a failure leaves the run
   green with an error line. **They must stay short:** runs go one at a time, so
   the next run's Pages deploys wait for them. Each call has a 5 s connect and
   10 s read timeout and one retry, a publish stops at a 120 s deadline before its
