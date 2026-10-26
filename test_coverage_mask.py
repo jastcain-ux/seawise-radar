@@ -3,8 +3,10 @@
 The pure half (`coverage_mask.py`) needs numpy and Pillow; the run's half (`observed.write_coverage`) imports observed,
 which needs eccodes, as the runner and the pins venv have.
 """
+import contextlib
 import datetime
 import hashlib
+import io
 import json
 import os
 import sys
@@ -31,9 +33,14 @@ VALUES = np.full((200, 200), -99.0)
 VALUES[:, 100:] = -999.0
 BBOX = (-89.8, 28.2, -88.2, 29.8)      # inside the mosaic, the dry/blind line through its middle at 89.0 W
 SIZE = (160, 160)
+# With a blind band across the watched half too, so a north-south edge is drawn (the second re-check's note).
+VALUES_BAND = VALUES.copy()
+VALUES_BAND[120:140, :100] = -999.0
 # The same mosaic stored south to north, as a GRIB may be: row 0 is the southern edge.
 META_UP = dict(META, latitudeOfFirstGridPointInDegrees=28.01, jScansPositively=1)
-VALUES_UP = VALUES[::-1].copy()
+VALUES_UP = VALUES_BAND[::-1].copy()
+# A box over the mosaic's north-west corner, half of it off the mosaic.
+EDGE, EDGE_SIZE = (-90.3, 29.5, -89.7, 30.3), (60, 90)
 # A small box in the mosaic's north-west corner, all watched: its mask reads only the cells near it.
 SMALL, SMALL_SIZE = (-89.95, 29.6, -89.6, 29.95), (35, 35)
 
@@ -113,11 +120,14 @@ class ImageTests(unittest.TestCase):
 
     # The drawing, pinned to the mask rule's revision: masks on disk keep their names until MASK_RULE changes, so a
     # change to what is drawn (unseen, pixel_coords, halo_bbox, coverage_image) must come with a new revision.
-    PINNED = {"coverage-1": "c64e7a32c996413a9a29c68d6f7a15fe8fbc9695"}
+    PINNED = {"coverage-1": "88eb46642879ee332a474231abd3e24a0bb37f00"}
 
     def test_the_drawing_is_pinned_to_the_mask_rule(self):
-        rgba = np.asarray(coverage_image(unseen(VALUES, META, BBOX, SIZE, R, 24)).convert("RGBA"))
-        self.assertEqual(self.PINNED.get(MASK_RULE), hashlib.sha1(rgba.tobytes()).hexdigest(),
+        # East-west and north-south edges, and a box half off the mosaic.
+        digest = hashlib.sha1()
+        for values, bbox, size in ((VALUES_BAND, BBOX, SIZE), (VALUES_BAND, EDGE, EDGE_SIZE)):
+            digest.update(np.asarray(coverage_image(unseen(values, META, bbox, size, R, 24)).convert("RGBA")).tobytes())
+        self.assertEqual(self.PINNED.get(MASK_RULE), digest.hexdigest(),
                          "the mask's drawing changed: bump MASK_RULE in coverage_mask.py and pin the new pixels here")
 
 
@@ -143,7 +153,7 @@ class NameTests(unittest.TestCase):
     def test_the_window_holds_every_cell_the_mask_reads(self):
         # Flip every mosaic cell outside the window between watched and blind: the mask must not change, or the
         # name would miss a change that moves it. Both scan orders.
-        for values, meta in ((VALUES, META), (VALUES_UP, META_UP)):
+        for values, meta in ((VALUES_BAND, META), (VALUES_UP, META_UP)):
             r0, r1, c0, c1 = mosaic_window(meta, SMALL)
             self.assertTrue(0 <= r0 < r1 <= meta["Nj"] and 0 <= c0 < c1 <= meta["Ni"])
             outside = np.ones(values.shape, dtype=bool)
@@ -154,7 +164,10 @@ class NameTests(unittest.TestCase):
                                           unseen(values, meta, SMALL, SMALL_SIZE, R, 24))
 
     def test_both_scan_orders_draw_the_same_mask(self):
-        np.testing.assert_array_equal(unseen(VALUES_UP, META_UP, BBOX, SIZE, R, 24), unseen(VALUES, META, BBOX, SIZE, R, 24))
+        for bbox, size in ((BBOX, SIZE), (EDGE, EDGE_SIZE)):
+            mask = unseen(VALUES_BAND, META, bbox, size, R, 24)
+            np.testing.assert_array_equal(unseen(VALUES_UP, META_UP, bbox, size, R, 24), mask)
+        self.assertTrue(mask.any() and not mask.all())
 
     def test_the_name_follows_the_grid_the_cell_and_its_drawing(self):
         name = self.name()
@@ -217,9 +230,10 @@ class WriteCoverageTests(unittest.TestCase):
         self.dir.cleanup()
         sys.modules.update(self.stand_ins)
 
-    def write(self, held, previous=None):
+    def write(self, held, previous=None, now=None):
         self.drawn_count.clear()
-        return self.observed.write_coverage(self.out, self.cells, SIZE, held, previous)
+        now = now or (held[0] if held else self.WHEN)
+        return self.observed.write_coverage(self.out, self.cells, SIZE, held, previous, now=now)
 
     def at(self, minutes):
         return self.WHEN + datetime.timedelta(minutes=minutes)
@@ -262,6 +276,39 @@ class WriteCoverageTests(unittest.TestCase):
         self.assertNotIn("replaced", later)
         self.assertEqual(sorted(to_remove(self.on_disk(), named_by({"coverage": later}), self.at(100), 180)),
                          sorted(e["image"] for e in b["frames"]))
+
+    def test_a_replaced_mask_stays_named_through_the_runs_of_its_hour(self):
+        # The second re-check: B standing at 16:00, A replaced at 15:15 must still be named, and survive the prune.
+        a = self.write((self.WHEN, VALUES, META))
+        b = self.write((self.at(15), self.MOVED, META), previous=a)
+        still = self.write((self.at(60), self.MOVED, META), previous=b)
+        self.assertEqual([e["image"] for e in still["replaced"]], [e["image"] for e in a["frames"]])
+        self.assertEqual({e["replacedAt"] for e in still["replaced"]}, {"2026-10-26T15:15:00Z"})
+        self.assertEqual(to_remove(self.on_disk(), named_by({"coverage": still}), self.at(60), 180), [])
+        gone = self.write((self.at(90), self.MOVED, META), previous=still)
+        self.assertNotIn("replaced", gone)
+
+    def test_a_mask_is_replaced_by_the_clock_when_the_manifest_is_written(self):
+        a = self.write((self.WHEN, VALUES, META))
+        b = self.write((self.at(15), self.MOVED, META), previous=a, now=self.at(22))
+        self.assertEqual({e["replacedAt"] for e in b["replaced"]}, {"2026-10-26T15:22:00Z"})
+        self.assertEqual(b["observedTime"], "2026-10-26T15:15:00Z")
+
+    def test_a_time_with_no_zone_is_read_as_no_time(self):
+        a = self.write((self.WHEN, self.MOVED, META))
+        naive = dict(a, observedTime="2026-10-26T15:00:00",
+                     replaced=[{"cell": "gulf-a", "image": a["frames"][0]["image"], "replacedAt": "2026-10-26"}])
+        block = self.write((self.at(-10), VALUES, META), previous=naive)
+        self.assertEqual(block["observedTime"], "2026-10-26T14:50:00Z")
+        self.assertEqual([e["image"] for e in block["replaced"]], [e["image"] for e in a["frames"]])
+
+    def test_when_every_mask_fails_the_last_block_stands(self):
+        a = self.write((self.WHEN, VALUES, META))
+
+        def fail(*args, **kwargs):
+            raise ValueError("planted")
+        self.observed.unseen = fail
+        self.assertEqual(self.write((self.at(15), self.MOVED, META), previous=a), a)
 
     def test_a_replaced_mask_gone_from_disk_is_not_named(self):
         a = self.write((self.WHEN, VALUES, META))
@@ -450,12 +497,16 @@ class MainTests(unittest.TestCase):
         def broken(*a, **k):
             raise RuntimeError("planted")
         self.observed.write_coverage = broken
+        printed = io.StringIO()
         try:
-            manifest = self.run_main([(self.T1, "k1"), (self.T2, "k2")])
+            with contextlib.redirect_stdout(printed):
+                manifest = self.run_main([(self.T1, "k1"), (self.T2, "k2")])
         finally:
             self.observed.write_coverage = saved
         self.assertNotIn("coverage", manifest)
         self.assertEqual(len(manifest["frames"]), 2)
+        self.assertIn("::error::coverage masks skipped this run: planted", printed.getvalue(),
+                      "a run that lost its masks must say so in its summary")
 
     def test_a_run_that_mends_an_older_frame_never_turns_the_coverage_back(self):
         self.grids = {"k1": self.a, "k2": self.b}

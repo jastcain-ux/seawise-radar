@@ -144,14 +144,15 @@ REPLACED_KEEP = datetime.timedelta(minutes=70)
 
 
 def _instant(text):
-    """A manifest's UTC time as a datetime, or None."""
+    """A manifest's time as an aware datetime, or None: a time with no zone is no time (the second re-check's note)."""
     try:
-        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        when = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError):
         return None
+    return when if when.tzinfo is not None else None
 
 
-def write_coverage(out, wanted, close_size, held, previous):
+def write_coverage(out, wanted, close_size, held, previous, now=None):
     """The manifest's `coverage` block (B-33 item 2), each mask it names drawn if it is not on disk.
 
     `held` is (when, values, meta) for the newest step the run read. The masks
@@ -162,9 +163,12 @@ def write_coverage(out, wanted, close_size, held, previous):
     (a step re-read to mend a frame): coverage is never turned back to an older
     reading (the re-check reader's SF2). A mask that fails is left out, never
     substituted. A mask the last block named and this one does not is kept
-    under `replaced` for `REPLACED_KEEP`, so a phone on the last manifest still
-    finds it, and a coverage that moves back finds it on disk.
+    under `replaced` for `REPLACED_KEEP` from `now`, the clock when this
+    manifest is written (not the step's time, which can be minutes older:
+    the second re-check's note), so a phone on the last manifest still finds
+    it, and a coverage that moves back finds it on disk.
     """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     previous = previous if isinstance(previous, dict) else {}
     last = [f for f in previous.get("frames", []) if isinstance(f, dict) and f.get("image")]
     last_standing = bool(last) and all(os.path.exists(os.path.join(out, f["image"])) for f in last)
@@ -192,14 +196,15 @@ def write_coverage(out, wanted, close_size, held, previous):
         return previous if last_standing else None
     named = {f["image"] for f in frames}
     replaced, seen = [], set()
-    for entry in previous.get("replaced", []) + [dict(f, replacedAt=None) for f in last]:
+    carried = previous.get("replaced") if isinstance(previous.get("replaced"), list) else []
+    for entry in carried + [dict(f, replacedAt=None) for f in last]:
         if not isinstance(entry, dict) or not entry.get("image"):
             continue
         image = entry["image"]
         if image in named or image in seen or not os.path.exists(os.path.join(out, image)):
             continue
-        at = _instant(entry.get("replacedAt")) if entry.get("replacedAt") else when
-        if at is None or when - at >= REPLACED_KEEP:
+        at = _instant(entry.get("replacedAt")) if entry.get("replacedAt") else now
+        if at is None or now - at >= REPLACED_KEEP:
             continue
         seen.add(image)
         replaced.append({"cell": entry.get("cell"), "image": image,
@@ -497,7 +502,7 @@ def main():
     try:
         coverage = write_coverage(args.out, coverage_cells(wanted_cells), size, held, published.get("coverage"))
     except Exception as e:                                  # noqa: BLE001 - reported, never substituted
-        print(f"  coverage: SKIPPED: {e}", file=sys.stderr)
+        print(f"::error::coverage masks skipped this run: {e}")
         coverage = None
 
     manifest = {
