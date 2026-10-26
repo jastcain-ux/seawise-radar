@@ -137,12 +137,15 @@ nobody watches (on 2026-10-26 at 15:06Z, 85% of the gulf-central cell). Each
 close and wide cell therefore gets a mask, drawn from the newest step the run
 read: its picture's size and pixels, grey at alpha 255 where no radar sees,
 clear elsewhere, 0.5 to 3 KB as a two-colour PNG. A mask is named by what it
-shows, `{cell}-coverage-{digest}.png`, and NOAA's no-coverage area hardly moves,
-so most runs name the files already there and draw and upload nothing; when it
-moves, the 63 are drawn again (about 6 s on a Mac). The manifest names them
-under `coverage` (a key the installed builds ignore), with the time of the step
-they were read from, and the app's rain reading is to answer "inconclusive",
-never "dry", where one is painted.
+shows, `{cell}-coverage-{digest}.png`, a digest of the blind cells under its own
+box, and NOAA's no-coverage area hardly moves, so most runs name the files
+already there and draw and upload nothing; when it moves, only the cells over
+it are drawn again (an hour's change on 2026-10-26 renamed 1 of 63). The
+manifest names them under `coverage` (a key the installed builds ignore), with
+the time of the step they were read from, never an older step's; a mask it
+stops naming stays under `coverage.replaced` for 70 minutes, for a phone still
+on the last manifest. The app's rain reading is to answer "inconclusive", never
+"dry", where one is painted.
 
 ## publish_r2.py — the copy in Cloudflare R2
 

@@ -51,7 +51,7 @@ from render import (ALPHA, CONUS_BBOX, MERCATOR_R, PALETTE, QUANTISER, RAMP,
 from smoothing import shape
 from peaks import band_tops, pixels_of, halo_bbox
 from naming import style_revision
-from coverage_mask import coverage_image, grid_digest, mask_name, pixel_coords, unseen
+from coverage_mask import blind_cells, coverage_image, mask_name, pixel_coords, unseen
 from steps import select
 
 BUCKET = "https://noaa-mrms-pds.s3.amazonaws.com"
@@ -138,27 +138,45 @@ def coverage_cells(wanted_cells):
     return [(n, b) for n, b in wanted_cells if n != NATIONAL_ID and not is_regional(n)]
 
 
+# A replaced mask stays named this long, for a phone still on the manifest that named it: the hour a phone keeps one,
+# and ten minutes over, as the nowcast's prune (radar build 7, item 21).
+REPLACED_KEEP = datetime.timedelta(minutes=70)
+
+
+def _instant(text):
+    """A manifest's UTC time as a datetime, or None."""
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def write_coverage(out, wanted, close_size, held, previous):
     """The manifest's `coverage` block (B-33 item 2), each mask it names drawn if it is not on disk.
 
     `held` is (when, values, meta) for the newest step the run read. The masks
     are named by what they show (`coverage_mask.mask_name`), so while NOAA's
     coverage stands still every run names the files already there and draws
-    nothing. With no step read this run, `previous`, the last manifest's
-    block, stands while its masks are on disk. A mask that fails is left out,
-    never substituted; with none, there is no block.
+    nothing. `previous`, the last manifest's block, stands while its masks are
+    on disk when the run read no step, or only one older than the block's own
+    (a step re-read to mend a frame): coverage is never turned back to an older
+    reading (the re-check reader's SF2). A mask that fails is left out, never
+    substituted. A mask the last block named and this one does not is kept
+    under `replaced` for `REPLACED_KEEP`, so a phone on the last manifest still
+    finds it, and a coverage that moves back finds it on disk.
     """
-    if held is None:
-        if previous and previous.get("frames") and all(
-                os.path.exists(os.path.join(out, f.get("image", ""))) for f in previous["frames"]):
-            return previous
-        return None
+    previous = previous if isinstance(previous, dict) else {}
+    last = [f for f in previous.get("frames", []) if isinstance(f, dict) and f.get("image")]
+    last_standing = bool(last) and all(os.path.exists(os.path.join(out, f["image"])) for f in last)
+    last_time = _instant(previous.get("observedTime"))
+    if held is None or (last_standing and last_time is not None and held[0] < last_time):
+        return previous if last_standing else None
     when, values, meta = held
-    grid = grid_digest(values, meta)
+    blind = blind_cells(values)
     frames = []
     for name, bbox in wanted:
         px = pixel_size(name, close_size)
-        image = mask_name(name, grid, bbox, px, SHAPE_HALO_PX)
+        image = mask_name(name, blind, meta, bbox, px, SHAPE_HALO_PX)
         path = os.path.join(out, image)
         if not os.path.exists(path):
             try:
@@ -171,10 +189,27 @@ def write_coverage(out, wanted, close_size, held, previous):
                 continue
         frames.append({"cell": name, "image": image})
     if not frames:
-        return None
-    return {"observedTime": when.isoformat().replace("+00:00", "Z"),
-            "meaning": "alpha 255 where no radar sees: never rain, and never dry",
-            "frames": frames}
+        return previous if last_standing else None
+    named = {f["image"] for f in frames}
+    replaced, seen = [], set()
+    for entry in previous.get("replaced", []) + [dict(f, replacedAt=None) for f in last]:
+        if not isinstance(entry, dict) or not entry.get("image"):
+            continue
+        image = entry["image"]
+        if image in named or image in seen or not os.path.exists(os.path.join(out, image)):
+            continue
+        at = _instant(entry.get("replacedAt")) if entry.get("replacedAt") else when
+        if at is None or when - at >= REPLACED_KEEP:
+            continue
+        seen.add(image)
+        replaced.append({"cell": entry.get("cell"), "image": image,
+                         "replacedAt": at.isoformat().replace("+00:00", "Z")})
+    block = {"observedTime": when.isoformat().replace("+00:00", "Z"),
+             "meaning": "alpha 255 where no radar sees: never rain, and never dry",
+             "frames": frames}
+    if replaced:
+        block["replaced"] = replaced
+    return block
 
 
 def cells():
@@ -436,7 +471,9 @@ def main():
             global _VALUES, _META, _SIZE, _OUT, _STAMP, _TOPS, _REV
             _VALUES, _META, _SIZE, _OUT, _STAMP, _REV = values, meta, size, args.out, stamp, rev
             _TOPS = grid_tops(values, meta)     # the step's cores, once, before the pool forks
-            with multiprocessing.Pool(processes=min(len(missing), os.cpu_count() or 2)) as pool:
+            # Forked by name, as the runner's Python 3.12 does by default: the workers read the grid set above,
+            # which a spawned or forkserver worker would not hold (the re-check reader's note).
+            with multiprocessing.get_context("fork").Pool(processes=min(len(missing), os.cpu_count() or 2)) as pool:
                 for name, ok, err in pool.imap_unordered(_render_one, missing):
                     if ok:
                         file_frame(name, when, f"{name}-{stamp}-{rev}.png")

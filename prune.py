@@ -27,8 +27,9 @@ of `public/`, and the moment the cell list changes every frame belonging to a
 retired cell is orphaned and would be carried for ever.
 
 What the manifest names is every picture under `frames`, under
-`regional.frames` and under `coverage.frames` (`named_by`; the measured
-manifest's masks of where no radar sees, B-33 item 2), the regional tier included: the nowcast's,
+`regional.frames`, under `coverage.frames` and under `coverage.replaced`
+(`named_by`; the measured manifest's masks of where no radar sees, and those it
+replaced in the last 70 minutes, B-33 item 2), the regional tier included: the nowcast's,
 the measured's, cloud's and wind's regional pictures sit in the same
 directory, and keeping only the top level let a named regional picture go
 while its manifest still named it (B-282's plan, step 4).
@@ -67,7 +68,8 @@ def named_by(manifest):
     """Every picture the manifest names: its `frames`, its regional tier's and its coverage masks (absent, none)."""
     named = {frame["image"] for frame in manifest.get("frames", [])}
     named |= {frame["image"] for frame in (manifest.get("regional") or {}).get("frames", [])}
-    named |= {frame["image"] for frame in (manifest.get("coverage") or {}).get("frames", [])}
+    coverage = manifest.get("coverage") or {}
+    named |= {frame["image"] for frame in coverage.get("frames", []) + coverage.get("replaced", [])}
     return named
 
 
