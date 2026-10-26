@@ -108,7 +108,7 @@ jobs:
       # Measured radar, every run. Cheap: one or two new frames per run,
       # about 1.5 MB in and 400 KB out each.
       - name: Unit tests for the renderer maths
-        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate test_prune test_workflow
+        run: python -m unittest test_cells test_nowcast test_render test_steps test_gate test_prune test_workflow test_coverage
 
       - name: Render measured frames
         run: python observed.py --out public/observed

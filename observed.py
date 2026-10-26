@@ -51,6 +51,7 @@ from render import (ALPHA, CONUS_BBOX, MERCATOR_R, PALETTE, QUANTISER, RAMP,
 from smoothing import shape
 from peaks import band_tops, pixels_of, halo_bbox
 from naming import style_revision
+from coverage import coverage_image, coverage_name, pixel_coords, unseen
 from steps import select
 
 BUCKET = "https://noaa-mrms-pds.s3.amazonaws.com"
@@ -108,14 +109,8 @@ def _render_one(cell):
         # Each tier at its own size: close cells sharp, the middle tier at the
         # density the forecast half publishes, the national frame at the
         # model's own resolution.
-        if name == NATIONAL_ID:
-            px = NATIONAL_SIZE
-        elif is_regional(name):
-            px = REGIONAL_SIZE          # the regional tier, 1:1 with the mosaic (item 11)
-        elif name.startswith("wide-"):
-            px = MID_SIZE
-        else:
-            px = _SIZE
+        # The regional tier is 1:1 with the mosaic (item 11).
+        px = pixel_size(name, _SIZE)
         # The national picture samples the 1 km mosaic every 2.6 cells; a
         # block maximum first, so no core between samples reads low (D-66's
         # "never weaker than measured", C-15, C-16; item 19).
@@ -125,6 +120,51 @@ def _render_one(cell):
         return name, True, None
     except Exception as e:            # noqa: BLE001 - reported, never substituted
         return name, False, str(e)
+
+
+def pixel_size(name, close_size):
+    """A cell's picture size: the close tier at `close_size`, the others at their tier's."""
+    if name == NATIONAL_ID:
+        return NATIONAL_SIZE
+    if is_regional(name):
+        return REGIONAL_SIZE
+    if name.startswith("wide-"):
+        return MID_SIZE
+    return close_size
+
+
+def coverage_cells(wanted_cells):
+    """The cells that get a coverage mask: the close and wide tiers, the only ones the card reads "dry" from."""
+    return [(n, b) for n, b in wanted_cells if n != NATIONAL_ID and not is_regional(n)]
+
+
+def write_coverage(out, when, key, wanted, close_size, held):
+    """The newest step's masks (B-33 item 2): each one missing is drawn, and the ones on disk are listed.
+
+    `held` is (when, values, meta) for the step the run last read, or None; the
+    step is read again only when it is not that one (a run that drew no new
+    measured frame, the first run after this change).
+    """
+    stamp = when.strftime("%Y%m%dT%H%M") + "Z"
+    todo = [(n, b) for n, b in wanted if not os.path.exists(os.path.join(out, coverage_name(n, stamp)))]
+    if todo:
+        if held is not None and held[0] == when:
+            values, meta = held[1], held[2]
+        else:
+            try:
+                values, meta, _ = read_frame(key)
+            except Exception as e:                          # noqa: BLE001 - reported, never substituted
+                print(f"  coverage {when:%H:%M}Z  SKIPPED: {e}", file=sys.stderr)
+                values = None
+        if values is not None:
+            for name, bbox in todo:
+                try:
+                    mask = unseen(values, meta, bbox, pixel_size(name, close_size), MERCATOR_R, SHAPE_HALO_PX)
+                    coverage_image(mask).save(os.path.join(out, coverage_name(name, stamp)), optimize=True)
+                except Exception as e:                      # noqa: BLE001 - reported, never substituted
+                    print(f"  coverage {when:%H:%M}Z {name}: SKIPPED: {e}", file=sys.stderr)
+    return [{"cell": n, "image": coverage_name(n, stamp)} for n, _ in wanted
+            if os.path.exists(os.path.join(out, coverage_name(n, stamp)))]
 
 
 def cells():
@@ -276,34 +316,12 @@ def render(values, meta, bbox, size, tops=None, block=None):
     if block:
         field = ndimage.maximum_filter(field, size=block, mode="nearest")
 
-    lon0 = meta["longitudeOfFirstGridPointInDegrees"]
-    if lon0 > 180:
-        lon0 -= 360
-    lat0 = meta["latitudeOfFirstGridPointInDegrees"]
     di = meta["iDirectionIncrementInDegrees"]
-    dj = meta["jDirectionIncrementInDegrees"]
-    # MRMS scans north to south, so a row index counts *down* from lat0.
-    south_up = bool(meta.get("jScansPositively"))
 
     wanted, wanted_size = bbox, size
     bbox, size = halo_bbox(bbox, size, SHAPE_HALO_PX)
-    west, south, east, north = bbox
-    def merc_y(lat):
-        return math.log(math.tan((90 + lat) * math.pi / 360)) / (math.pi / 180) * MERCATOR_R / 180
-
-    min_x, max_x = west * MERCATOR_R / 180, east * MERCATOR_R / 180
-    min_y, max_y = merc_y(south), merc_y(north)
-
-    width, height = size
-    mx, my = np.meshgrid(np.linspace(min_x, max_x, width),
-                         np.linspace(max_y, min_y, height))
-    lon = mx / MERCATOR_R * 180
-    lat = np.degrees(2 * np.arctan(np.exp(my / MERCATOR_R * math.pi)) - math.pi / 2)
-
-    fx = (lon - lon0) / di
-    fy = (lat - lat0) / dj if south_up else (lat0 - lat) / dj
-
-    inside = (fx >= 0) & (fx < meta["Ni"] - 1) & (fy >= 0) & (fy < meta["Nj"] - 1)
+    # The pixel grid is coverage.py's, shared with the masks (B-33 item 2).
+    fx, fy, inside = pixel_coords(meta, bbox, size, MERCATOR_R)
     interpolated = ndimage.map_coordinates(field, [fy, fx], order=3,
                                            mode="nearest", prefilter=True)
     sampled = np.where(inside, interpolated, -99.0)
@@ -358,10 +376,14 @@ def main():
         print(f"drawing rule changed; drawing every measured frame under revision {rev}")
 
     frames, regional_frames, downloaded, reused, rendered = [], [], 0, 0, 0
+    filed = {}          # each step with a frame filed, time -> key: the masks are the newest one's
+    held = None         # (when, values, meta) of the step last read, so its masks need no second download
 
     def file_frame(name, when, image_name):
         entry = {"observedTime": when.isoformat().replace("+00:00", "Z"), "cell": name, "image": image_name}
         (regional_frames if is_regional(name) else frames).append(entry)
+        if not is_regional(name):
+            filed[when] = key
     for when, key in steps:
         stamp = when.strftime("%Y%m%dT%H%M") + "Z"
         # Which cells still need this step. One GRIB read serves all of them,
@@ -373,6 +395,7 @@ def main():
             try:
                 values, meta, nbytes = read_frame(key)
                 downloaded += nbytes
+                held = (when, values, meta)
             except Exception as e:
                 # Absent, never substituted.
                 print(f"  {when:%H:%M}Z  SKIPPED: {e}", file=sys.stderr)
@@ -423,6 +446,13 @@ def main():
     if not frames:
         raise SystemExit("no frames rendered; leaving the previous manifest in place")
 
+    # Where no radar sees, for the newest step with a frame (B-33 item 2): drawn
+    # after the frames and before the manifest, so a manifest names only masks
+    # on disk. A failure here costs the masks, never the frames.
+    coverage_when = max(filed)
+    coverage_frames = write_coverage(args.out, coverage_when, filed[coverage_when],
+                                     coverage_cells(wanted_cells), size, held)
+
     manifest = {
         "product": "MRMS MergedReflectivityQCComposite",
         "field": "composite reflectivity",
@@ -451,6 +481,15 @@ def main():
         },
         "frames": frames,
     }
+    # Where no radar sees (B-33 item 2), under a key the installed builds ignore: one mask per close and wide cell
+    # for the newest step, each its picture's size and pixels, alpha 255 where no radar sees. Its absence means
+    # nothing is known, never that everything is seen.
+    if coverage_frames:
+        manifest["coverage"] = {
+            "observedTime": coverage_when.isoformat().replace("+00:00", "Z"),
+            "meaning": "alpha 255 where no radar sees: never rain, and never dry",
+            "frames": coverage_frames,
+        }
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
     print(f"{len(steps)} steps x {len(wanted_cells)} cells: "
