@@ -134,6 +134,39 @@ class CloudWindPruneTests(unittest.TestCase):
         self.assertEqual(self.prune([self.CURRENT, replacer, replaced_136], from_replacement=True),
                          [replaced_136])
 
+    def test_a_partial_set_newer_than_the_named_one_goes_in_its_own_run(self):
+        # Batch 9's build reader: wind.py dies after a few pictures (the step runs on), leaving a set newer than the
+        # one the manifest names. It was never live, so it goes now, before the carry, and replaces nothing.
+        partial = "national-wind-0060-20261013T0140Z.png"     # 10 minutes old, never named
+        self.assertEqual(self.prune([self.CURRENT, partial], from_replacement=True), [partial])
+
+    def test_with_the_partial_set_gone_the_named_set_keeps_its_whole_keep(self):
+        # Had the partial set of 01:40 been carried, the 01:20 set would have counted as replaced at 01:40 and gone
+        # in the run that published the next good set two and a half hours later, while phones still asked for it.
+        later = NOW + datetime.timedelta(minutes=170)          # 04:40
+        good = "national-wind-0060-20261013T0430Z.png"         # the next good set, 10 minutes old
+        partial = "national-wind-0060-20261013T0140Z.png"
+        keep = {"manifest.json", good}
+        self.assertEqual(to_remove([good, self.CURRENT, "manifest.json"], keep, later, 135, from_replacement=True), [])
+        self.assertIn(self.CURRENT,
+                      to_remove([good, self.CURRENT, partial, "manifest.json"], keep, later, 135, from_replacement=True))
+
+    def test_an_unnamed_picture_of_the_named_publication_is_not_newer(self):
+        twin = "gulf-east-wind-0060-20261013T0120Z.png"        # the named set's own stamp, not named
+        self.assertEqual(self.prune([self.CURRENT, twin], from_replacement=True), [])
+
+    def test_at_the_changeover_a_stamped_set_newer_than_the_unstamped_manifest_goes(self):
+        # The manifest still names the unstamped set; a stamped set beside it is a first stamped run that died. Kept,
+        # it would set the unstamped names' age and take them early once the first good stamped set lands.
+        partial = "national-wind-0060-20261013T0140Z.png"
+        keep = {"manifest.json", self.UNSTAMPED}
+        self.assertEqual(to_remove([self.UNSTAMPED, partial, "manifest.json"], keep, NOW, 135,
+                                   from_replacement=True, unstamped_as_old_as_stamped=True), [partial])
+
+    def test_without_from_replacement_nothing_is_judged_never_live(self):
+        partial = "national-wind-0060-20261013T0140Z.png"
+        self.assertEqual(self.prune([self.CURRENT, partial]), [])
+
     def test_the_newest_unnamed_set_with_nothing_newer_stays(self):
         # A step that died before its manifest leaves a newer set nothing names; nothing has replaced it.
         orphan = "national-wind-0060-20261012T2000Z.png"

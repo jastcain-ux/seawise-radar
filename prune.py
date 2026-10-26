@@ -43,7 +43,13 @@ regional tier's `forecast-regional`) with the first of them (B-293):
   timing from the stamp would delete the set a phone fetched a moment ago in
   the very run that replaced it. A set is replaced at the stamp of the next
   newer set in the directory; the newest unnamed set, replaced by nothing yet,
-  stays.
+  stays. A set stamped newer than everything the manifest names was never
+  live, and goes at once: cloud and wind run on after a failure, so a step
+  that dies part-way leaves such a set, and kept, it would count as the
+  replacement of the set the manifest still names, which would then go up to
+  135 minutes early (batch 9's build reader). Where the manifest names only
+  unstamped pictures (the changeover), every stamped set is newer than them.
+  Where it names nothing present, nothing is judged never live.
 - `--unstamped-as-old-as-stamped`: the changeover. Until B-282 these names
   carried no stamp and were overwritten each run; after it they are never
   written again, and their bytes stay right for a phone still on a pre-change
@@ -70,14 +76,28 @@ def to_remove(names, keep, now, grace_minutes, from_replacement=False, unstamped
 
     With `from_replacement` a stamped name's age is counted from the next newer
     stamp among `names` (when its set was replaced), and with none newer it
-    stays. With `unstamped_as_old_as_stamped` a name with no stamp is as old as
-    the oldest stamped name among `names`, and stays when there is none.
+    stays; a stamped name newer than every picture `keep` names goes at once,
+    and is no set's replacement. With `unstamped_as_old_as_stamped` a name with
+    no stamp is as old as the oldest stamped name among `names`, and stays when
+    there is none.
     """
     ages = {name: stamp_age_minutes(name, now) for name in names}
-    stamped = sorted({age for age in ages.values() if age is not None})   # youngest first
+    never_live = set()
+    if from_replacement:
+        named = [name for name in names if name in keep and name != "manifest.json"]
+        if named:
+            named_ages = [ages[name] for name in named if ages[name] is not None]
+            youngest_named = min(named_ages) if named_ages else float("inf")
+            never_live = {name for name in names
+                          if name not in keep and ages[name] is not None and ages[name] < youngest_named}
+    stamped = sorted({ages[name] for name in names
+                      if ages[name] is not None and name not in never_live})   # youngest first
     out = []
     for name in names:
         if name in keep:
+            continue
+        if name in never_live:
+            out.append(name)
             continue
         age = ages[name]
         if age is None and unstamped_as_old_as_stamped:
