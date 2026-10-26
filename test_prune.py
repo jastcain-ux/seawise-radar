@@ -161,6 +161,62 @@ class CloudWindPruneTests(unittest.TestCase):
         self.assertEqual(self.prune([self.CURRENT, self.UNSTAMPED]), [self.UNSTAMPED])
 
 
+class ForecastPruneTests(unittest.TestCase):
+    """The radar's own forecast prunes, timed from replacement too (B-293)."""
+
+    def read(self, path):
+        with open(os.path.join(HERE, path)) as f:
+            return f.read()
+
+    def test_a_long_gap_never_deletes_the_radar_set_just_replaced(self):
+        # NOMADS down: the forecast published 150 minutes after the last. A phone that fetched the previous
+        # manifest a moment ago still asks for its pictures; they stay, and the set before them goes.
+        current = "gulf-east-refc-0015-20261013T0150Z.png"
+        previous = "gulf-east-refc-0015-20261012T2320Z.png"
+        older = "gulf-east-refc-0015-20261012T2220Z.png"      # replaced by `previous` 150 minutes ago
+        national = "national-refc-0015-20261013T0150Z.png"
+        names = [current, national, previous, older, "manifest.json"]
+        keep = {"manifest.json", current, national}
+        self.assertEqual(to_remove(names, keep, NOW, 135, from_replacement=True), [older])
+        # Timed from its own stamp, as before B-293, the set just replaced went in the same run.
+        self.assertEqual(to_remove(names, keep, NOW, 135), [previous, older])
+
+    def test_the_regional_tier_keeps_its_replaced_set_after_a_long_gap(self):
+        current = "regional-25n-90w-refc-0060-20261013T0150Z.png"
+        previous = "regional-25n-90w-refc-0060-20261012T2320Z.png"
+        names = [current, previous, "manifest.json"]
+        self.assertEqual(to_remove(names, {"manifest.json", current}, NOW, 135, from_replacement=True), [])
+
+    def test_an_unnamed_unstamped_name_in_the_forecast_root_still_goes(self):
+        # Only the cloud and wind changeover keeps unstamped names; the radar root never needed it.
+        current = "gulf-east-refc-0015-20261013T0150Z.png"
+        self.assertEqual(to_remove([current, "gulf-east-refc-0015.png", "manifest.json"],
+                                   {"manifest.json", current}, NOW, 135, from_replacement=True),
+                         ["gulf-east-refc-0015.png"])
+
+    def test_both_forecast_workflows_prune_from_replacement(self):
+        radar = self.read(os.path.join(".github", "workflows", "radar.yml"))
+        self.assertIn("python prune.py --dir public --keep-newer-than 135 --from-replacement\n", radar)
+        regional = self.read(os.path.join(".github", "workflows", "forecast-regional.yml"))
+        self.assertIn("python prune.py --dir site/forecast-regional --keep-newer-than 135 --from-replacement\n", regional)
+
+    def test_a_failed_forecast_render_carries_no_partial_set(self):
+        # The edge B-282's build named: a partial newer set would count as the replacer of the set before it.
+        # The radar root and the regional tier never carry one: their render steps stop the job, and the
+        # carry step after them has no `if:` that would run it anyway.
+        radar = self.read(os.path.join(".github", "workflows", "radar.yml"))
+        render = radar.index("- name: Render forecast frames when NOMADS has a newer run")
+        carry = radar.index("- name: Carry the frames to the next run\n")
+        self.assertLess(render, carry)
+        self.assertNotIn("continue-on-error", radar[render:radar.index("- name: Start the regional tier")])
+        self.assertNotIn("if:", radar[carry:radar.index("- name: Publish everything")])
+        regional = self.read(os.path.join(".github", "workflows", "forecast-regional.yml"))
+        step = regional[regional.index("- name: Render the regional tier"):regional.index("- name: Prune pictures")]
+        self.assertNotIn("continue-on-error", step)
+        carry = regional[regional.index("- name: Carry the tier"):regional.index("- name: Publish the tier")]
+        self.assertNotIn("if:", carry)
+
+
 class FieldSourceTests(unittest.TestCase):
     """cloud.py and wind.py import eccodes, so their naming is checked in their source (B-282)."""
 

@@ -266,9 +266,15 @@ jobs:
       # from their own stamp, so a long gap between publishes never deletes the set
       # just replaced. The names from before B-282 carried no stamp; they are kept
       # until the first stamped set has been standing 135 minutes, then go.
+      #
+      # The radar's own forecast frames, the same from replacement (B-293): timed
+      # from their own stamp, a gap of 135 minutes or more between forecast
+      # publishes deleted the set just replaced in the run that replaced it. A
+      # render that fails part-way leaves no newer set to be timed from: this job
+      # stops there and its carry step does not run.
       - name: Prune forecast frames the timeline can no longer reach, an hour after they are replaced
         run: |
-          python prune.py --dir public --keep-newer-than 135
+          python prune.py --dir public --keep-newer-than 135 --from-replacement
           python prune.py --dir public/cloud --keep-newer-than 135 --from-replacement --unstamped-as-old-as-stamped
           python prune.py --dir public/wind --keep-newer-than 135 --from-replacement --unstamped-as-old-as-stamped
 

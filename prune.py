@@ -33,7 +33,8 @@ directory, and keeping only the top level let a named regional picture go
 while its manifest still named it (B-282's plan, step 4).
 
 The cloud and wind directories (`public/cloud`, `public/wind`) are pruned with
-two more rules (B-282):
+two more rules (B-282), and the radar's own forecast (`public`, and the
+regional tier's `forecast-regional`) with the first of them (B-293):
 
 - `--from-replacement`: a set's keep runs from when it was **replaced**, not
   from its own stamp. Their stamp is the publication, and a forecast publish

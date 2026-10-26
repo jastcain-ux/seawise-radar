@@ -64,8 +64,11 @@ jobs:
 
       # 135, as the main workflow's forecast prune: the stamp is the publication,
       # about an hour apart, so 60 would remove the previous set as it is replaced.
+      # Counted from when the next set replaced it, not from its own stamp (B-293):
+      # after a gap of 135 minutes or more the set just replaced would otherwise go
+      # in the run that replaced it.
       - name: Prune pictures the timeline can no longer reach, an hour after they are replaced
-        run: python prune.py --dir site/forecast-regional --keep-newer-than 135
+        run: python prune.py --dir site/forecast-regional --keep-newer-than 135 --from-replacement
 
       - name: Carry the tier to the next run
         uses: actions/cache/save@v4
